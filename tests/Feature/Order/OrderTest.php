@@ -37,6 +37,22 @@ class OrderTest extends TestCase
         return auth('api')->login($admin);
     }
 
+    private function deliveryData(
+    array $overrides = []
+): array {
+    return array_merge([
+        'delivery_method' => 'standard',
+        'delivery_name' => 'Jane Doe',
+        'delivery_phone' => '08012345678',
+        'delivery_state' => 'Lagos',
+        'delivery_lga' => 'Ikeja',
+        'delivery_address' =>
+            '12 Allen Avenue, Ikeja',
+        'delivery_notes' =>
+            'Call when you arrive',
+    ], $overrides);
+}
+
     private function createListing(
         string $produceName = 'Rice',
         string $price = '45000.00',
@@ -85,6 +101,172 @@ class OrderTest extends TestCase
         ]);
     }
 
+    public function test_order_stores_delivery_snapshot(): void
+{
+    $listing = $this->createListing(
+        price: '1500.00'
+    );
+
+    $response = $this
+        ->withToken($this->userToken())
+        ->postJson('/api/v1/orders', [
+            'items' => [
+                [
+                    'listing_id' =>
+                        $listing->id,
+                    'quantity' => 2,
+                ],
+            ],
+
+            ...$this->deliveryData([
+                'delivery_method' =>
+                    'express',
+
+                'delivery_name' =>
+                    'Joy Ibrahim',
+
+                'delivery_phone' =>
+                    '08099998888',
+
+                'delivery_state' =>
+                    'Abuja',
+
+                'delivery_lga' =>
+                    'AMAC',
+
+                'delivery_address' =>
+                    '14 Aminu Kano Crescent',
+
+                'delivery_notes' =>
+                    'Leave with security',
+            ]),
+        ]);
+
+    $response
+        ->assertCreated()
+        ->assertJsonPath(
+            'data.delivery.method',
+            'express'
+        )
+        ->assertJsonPath(
+            'data.delivery.name',
+            'Joy Ibrahim'
+        )
+        ->assertJsonPath(
+            'data.delivery.phone',
+            '08099998888'
+        )
+        ->assertJsonPath(
+            'data.delivery.state',
+            'Abuja'
+        )
+        ->assertJsonPath(
+            'data.delivery.lga',
+            'AMAC'
+        )
+        ->assertJsonPath(
+            'data.delivery.address',
+            '14 Aminu Kano Crescent'
+        )
+        ->assertJsonPath(
+            'data.delivery.notes',
+            'Leave with security'
+        );
+
+    $this->assertDatabaseHas(
+        'orders',
+        [
+            'id' =>
+                $response->json('data.id'),
+
+            'delivery_method' =>
+                'express',
+
+            'delivery_name' =>
+                'Joy Ibrahim',
+
+            'delivery_phone' =>
+                '08099998888',
+
+            'delivery_state' =>
+                'Abuja',
+
+            'delivery_lga' =>
+                'AMAC',
+
+            'delivery_address' =>
+                '14 Aminu Kano Crescent',
+
+            'delivery_notes' =>
+                'Leave with security',
+        ]
+    );
+}
+
+public function test_delivery_information_is_required(): void
+{
+    $listing = $this->createListing();
+
+    $this
+        ->withToken($this->userToken())
+        ->postJson('/api/v1/orders', [
+            'items' => [
+                [
+                    'listing_id' =>
+                        $listing->id,
+
+                    'quantity' => 1,
+                ],
+            ],
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors([
+            'delivery_method',
+            'delivery_name',
+            'delivery_phone',
+            'delivery_state',
+            'delivery_lga',
+            'delivery_address',
+        ]);
+
+    $this->assertDatabaseCount(
+        'orders',
+        0
+    );
+}
+
+public function test_delivery_method_must_be_standard_or_express(): void
+{
+    $listing = $this->createListing();
+
+    $this
+        ->withToken($this->userToken())
+        ->postJson('/api/v1/orders', [
+            'items' => [
+                [
+                    'listing_id' =>
+                        $listing->id,
+
+                    'quantity' => 1,
+                ],
+            ],
+
+            ...$this->deliveryData([
+                'delivery_method' =>
+                    'same_day_rocket',
+            ]),
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors([
+            'delivery_method',
+        ]);
+
+    $this->assertDatabaseCount(
+        'orders',
+        0
+    );
+}
+
     public function test_buyer_can_create_order_with_multiple_items(): void
     {
         $rice = $this->createListing(
@@ -116,6 +298,8 @@ class OrderTest extends TestCase
                         'quantity' => 5,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ]);
 
         $response
@@ -237,6 +421,8 @@ class OrderTest extends TestCase
                         'quantity' => 4,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ]);
 
         $response
@@ -260,36 +446,57 @@ class OrderTest extends TestCase
     }
 
     public function test_client_cannot_submit_order_totals_or_prices(): void
-    {
-        $listing = $this->createListing();
+{
+    $listing = $this->createListing();
 
-        $this
-            ->withToken($this->userToken())
-            ->postJson('/api/v1/orders', [
-                'items' => [
-                    [
-                        'listing_id' => $listing->id,
-                        'quantity' => 2,
-                        'unit_price' => 1,
-                    ],
+    $this
+        ->withToken($this->userToken())
+        ->postJson('/api/v1/orders', [
+            'items' => [
+                [
+                    'listing_id' => $listing->id,
+                    'quantity' => 2,
+
+                    // Client attempts to manipulate the price.
+                    'unit_price' => 1,
                 ],
-                'total' => 1,
-            ])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors([
-                'items.0.unit_price',
-                'total',
-            ]);
+            ],
 
-        $this->assertDatabaseMissing('orders', [
+            // Client attempts to manipulate the order total.
             'total' => 1,
+
+            // Everything else about checkout is valid.
+            ...$this->deliveryData(),
+        ])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors([
+            'items.0.unit_price',
+            'total',
         ]);
 
-        $this->assertDatabaseHas('listings', [
-            'id' => $listing->id,
-            'stock' => 100,
-        ]);
-    }
+    /*
+     * No order should have been created from the
+     * malicious/invalid request.
+     */
+    $this->assertDatabaseCount(
+        'orders',
+        0
+    );
+
+    $this->assertDatabaseCount(
+        'order_items',
+        0
+    );
+
+    /*
+     * Stock must also remain untouched because
+     * validation failed before checkout occurred.
+     */
+    $this->assertDatabaseHas('listings', [
+        'id' => $listing->id,
+        'stock' => 100,
+    ]);
+}
 
     public function test_order_rejects_insufficient_stock_without_changing_any_stock(): void
     {
@@ -321,6 +528,8 @@ class OrderTest extends TestCase
                         'quantity' => 5,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertUnprocessable()
             ->assertJsonValidationErrors([
@@ -363,6 +572,8 @@ class OrderTest extends TestCase
                         'quantity' => 1,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertUnprocessable()
             ->assertJsonValidationErrors([
@@ -397,6 +608,8 @@ class OrderTest extends TestCase
                         'quantity' => 2,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertUnprocessable()
             ->assertJsonValidationErrors([
@@ -447,6 +660,8 @@ class OrderTest extends TestCase
                         'quantity' => 4,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertCreated();
 
@@ -523,6 +738,8 @@ class OrderTest extends TestCase
                         'quantity' => 1,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertCreated();
 
@@ -576,6 +793,8 @@ class OrderTest extends TestCase
                         'quantity' => 2,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertCreated();
 
@@ -624,6 +843,8 @@ class OrderTest extends TestCase
                         'quantity' => 1,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertCreated();
 
@@ -694,6 +915,8 @@ class OrderTest extends TestCase
                         'quantity' => 3,
                     ],
                 ],
+
+                ...$this->deliveryData()
             ])
             ->assertCreated();
 

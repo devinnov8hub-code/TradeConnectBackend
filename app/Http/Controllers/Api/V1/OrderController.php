@@ -16,9 +16,11 @@ use Illuminate\Validation\ValidationException;
 
 class OrderController extends Controller
 {
-    public function index(Request $request): JsonResponse
-    {
-        $orders = $request->user()
+    public function index(
+        Request $request
+    ): JsonResponse {
+        $orders = $request
+            ->user()
             ->orders()
             ->with([
                 'items.produce.category',
@@ -32,27 +34,35 @@ class OrderController extends Controller
             ->get();
 
         return response()->json([
-            'data' => OrderResource::collection($orders),
+            'data' => OrderResource::collection(
+                $orders
+            ),
         ]);
     }
 
-    public function store(StoreOrderRequest $request): JsonResponse
-    {
+    public function store(
+        StoreOrderRequest $request
+    ): JsonResponse {
+        $validated = $request->validated();
+
         $requestedItems = collect(
-            $request->validated('items')
+            $validated['items']
         );
 
         $order = DB::transaction(
-            function () use ($request, $requestedItems): Order {
+            function () use (
+                $request,
+                $validated,
+                $requestedItems
+            ): Order {
                 /*
-                 * Always lock listings in the same order.
-                 *
-                 * This reduces the chance of deadlocks when two
-                 * buyers simultaneously order overlapping items.
+                 * Lock listings in a predictable order.
                  */
                 $listingIds = $requestedItems
                     ->pluck('listing_id')
-                    ->map(fn ($id) => (int) $id)
+                    ->map(
+                        fn ($id) => (int) $id
+                    )
                     ->sort()
                     ->values();
 
@@ -61,7 +71,10 @@ class OrderController extends Controller
                         'produce.category',
                         'farmer',
                     ])
-                    ->whereIn('id', $listingIds)
+                    ->whereIn(
+                        'id',
+                        $listingIds
+                    )
                     ->orderBy('id')
                     ->lockForUpdate()
                     ->get()
@@ -71,14 +84,23 @@ class OrderController extends Controller
                 $subtotal = '0.00';
 
                 /*
-                 * Validate everything again while holding
-                 * database row locks.
+                 * Revalidate stock while database rows
+                 * are locked.
                  */
-                foreach ($requestedItems as $index => $item) {
-                    $listingId = (int) $item['listing_id'];
-                    $quantity = (int) $item['quantity'];
+                foreach (
+                    $requestedItems as $index => $item
+                ) {
+                    $listingId = (int) $item[
+                        'listing_id'
+                    ];
 
-                    $listing = $listings->get($listingId);
+                    $quantity = (int) $item[
+                        'quantity'
+                    ];
+
+                    $listing = $listings->get(
+                        $listingId
+                    );
 
                     if (! $listing) {
                         throw ValidationException::withMessages([
@@ -88,7 +110,10 @@ class OrderController extends Controller
                         ]);
                     }
 
-                    if ($listing->status !== ListingStatus::Active) {
+                    if (
+                        $listing->status
+                        !== ListingStatus::Active
+                    ) {
                         throw ValidationException::withMessages([
                             "items.{$index}.listing_id" => [
                                 'This listing is not available.',
@@ -96,7 +121,10 @@ class OrderController extends Controller
                         ]);
                     }
 
-                    if ($listing->stock < $quantity) {
+                    if (
+                        $listing->stock
+                        < $quantity
+                    ) {
                         throw ValidationException::withMessages([
                             "items.{$index}.quantity" => [
                                 'Insufficient stock for this listing.',
@@ -105,7 +133,7 @@ class OrderController extends Controller
                     }
 
                     /*
-                     * Never accept price calculations from the client.
+                     * Prices always come from the database.
                      */
                     $lineTotal = bcmul(
                         (string) $listing->price,
@@ -120,41 +148,52 @@ class OrderController extends Controller
                     );
 
                     $preparedItems[] = [
-                        'listing_id' => $listing->id,
-                        'farmer_id' => $listing->farmer_id,
-                        'produce_id' => $listing->produce_id,
+                        'listing_id' =>
+                            $listing->id,
+
+                        'farmer_id' =>
+                            $listing->farmer_id,
+
+                        'produce_id' =>
+                            $listing->produce_id,
+
+                        'produce_name' =>
+                            $listing->produce->name,
+
+                        'category_name' =>
+                            $listing
+                                ->produce
+                                ->category?->name,
 
                         /*
-                         * Historical snapshot.
-                         */
-                        'produce_name' => $listing->produce->name,
-                        'category_name' => $listing
-                            ->produce
-                            ->category?->name,
-
-                        /*
-                         * Listing unit support comes in the
-                         * marketplace/listings phase.
+                         * Listing unit support will be added
+                         * during the listings phase.
                          */
                         'unit' => null,
 
-                        'quantity' => $quantity,
-                        'unit_price' => (string) $listing->price,
-                        'discount_amount' => '0.00',
-                        'line_total' => $lineTotal,
+                        'quantity' =>
+                            $quantity,
+
+                        'unit_price' =>
+                            (string) $listing->price,
+
+                        'discount_amount' =>
+                            '0.00',
+
+                        'line_total' =>
+                            $lineTotal,
                     ];
                 }
 
-                /*
-                 * At this point every item passed validation.
-                 *
-                 * Nothing has been decremented yet.
-                 */
                 $firstItem = $preparedItems[0];
 
                 /*
-                 * We don't yet have the delivery pricing business
-                 * rule, so the server currently owns a zero fee.
+                 * Delivery pricing is intentionally not
+                 * invented yet.
+                 *
+                 * The server still owns the value, but both
+                 * delivery methods currently cost 0 until the
+                 * real business rule is confirmed.
                  */
                 $deliveryFee = '0.00';
 
@@ -165,57 +204,102 @@ class OrderController extends Controller
                 );
 
                 $order = Order::create([
-                    'user_id' => $request->user()->id,
+                    'user_id' =>
+                        $request->user()->id,
 
                     /*
-                     * Temporary bridge for the original database
-                     * columns, which are currently non-null.
-                     *
-                     * New application logic uses order_items.
+                     * Temporary legacy bridge.
                      */
-                    'listing_id' => $firstItem['listing_id'],
-                    'quantity' => $firstItem['quantity'],
+                    'listing_id' =>
+                        $firstItem['listing_id'],
 
-                    'subtotal' => $subtotal,
-                    'delivery_fee' => $deliveryFee,
-                    'total' => $total,
+                    'quantity' =>
+                        $firstItem['quantity'],
 
-                    'status' => OrderStatus::New,
-                    'payment_status' => 'pending',
+                    'subtotal' =>
+                        $subtotal,
 
-                    'placed_at' => now(),
+                    'delivery_fee' =>
+                        $deliveryFee,
+
+                    'total' =>
+                        $total,
+
+                    'status' =>
+                        OrderStatus::New,
+
+                    'payment_status' =>
+                        'pending',
+
+                    /*
+                     * Delivery snapshot.
+                     *
+                     * This belongs to the order so changing
+                     * the buyer's profile later cannot alter
+                     * historical delivery information.
+                     */
+                    'delivery_method' =>
+                        $validated['delivery_method'],
+
+                    'delivery_name' =>
+                        $validated['delivery_name'],
+
+                    'delivery_phone' =>
+                        $validated['delivery_phone'],
+
+                    'delivery_state' =>
+                        $validated['delivery_state'],
+
+                    'delivery_lga' =>
+                        $validated['delivery_lga'],
+
+                    'delivery_address' =>
+                        $validated['delivery_address'],
+
+                    'delivery_notes' =>
+                        $validated['delivery_notes']
+                        ?? null,
+
+                    'placed_at' =>
+                        now(),
                 ]);
 
-                /*
-                 * The database ID guarantees uniqueness for this
-                 * simple order-number strategy.
-                 */
                 $order->update([
-                    'order_number' => 'ORD-'.str_pad(
-                        (string) $order->id,
-                        6,
-                        '0',
-                        STR_PAD_LEFT
-                    ),
+                    'order_number' =>
+                        'ORD-'.str_pad(
+                            (string) $order->id,
+                            6,
+                            '0',
+                            STR_PAD_LEFT
+                        ),
                 ]);
 
                 /*
-                 * Only after every item has been validated do
-                 * we mutate stock and create order items.
+                 * Stock changes only happen after all
+                 * items have passed validation.
                  */
-                foreach ($preparedItems as $preparedItem) {
+                foreach (
+                    $preparedItems
+                    as $preparedItem
+                ) {
                     $listing = $listings->get(
-                        $preparedItem['listing_id']
+                        $preparedItem[
+                            'listing_id'
+                        ]
                     );
 
                     $listing->decrement(
                         'stock',
-                        $preparedItem['quantity']
+                        $preparedItem[
+                            'quantity'
+                        ]
                     );
 
-                    $order->items()->create(
-                        $preparedItem
-                    );
+                    $order
+                        ->items()
+                        ->create(
+                            $preparedItem
+                        );
                 }
 
                 return $order;
@@ -232,7 +316,8 @@ class OrderController extends Controller
         ]);
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource($order),
         ], 201);
     }
 
@@ -240,7 +325,10 @@ class OrderController extends Controller
         Request $request,
         Order $order
     ): JsonResponse {
-        if ($order->user_id !== $request->user()->id) {
+        if (
+            $order->user_id
+            !== $request->user()->id
+        ) {
             return response()->json([
                 'message' => 'Order not found.',
             ], 404);
@@ -256,7 +344,8 @@ class OrderController extends Controller
         ]);
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource($order),
         ]);
     }
 
@@ -264,7 +353,10 @@ class OrderController extends Controller
         Request $request,
         Order $order
     ): JsonResponse {
-        if ($order->user_id !== $request->user()->id) {
+        if (
+            $order->user_id
+            !== $request->user()->id
+        ) {
             return response()->json([
                 'message' => 'Order not found.',
             ], 404);
@@ -272,24 +364,21 @@ class OrderController extends Controller
 
         if (! $order->isCancellable()) {
             return response()->json([
-                'message' => 'Only orders with status new can be cancelled.',
+                'message' =>
+                    'Only orders with status new can be cancelled.',
             ], 422);
         }
 
         $order = DB::transaction(
             function () use ($order): Order {
-                /*
-                 * Lock the order too.
-                 *
-                 * Without this, two simultaneous cancellation
-                 * requests could potentially restore stock twice.
-                 */
                 $lockedOrder = Order::query()
                     ->whereKey($order->id)
                     ->lockForUpdate()
                     ->firstOrFail();
 
-                if (! $lockedOrder->isCancellable()) {
+                if (
+                    ! $lockedOrder->isCancellable()
+                ) {
                     throw ValidationException::withMessages([
                         'order' => [
                             'Only orders with status new can be cancelled.',
@@ -302,8 +391,11 @@ class OrderController extends Controller
                 );
 
                 $lockedOrder->update([
-                    'status' => OrderStatus::Cancelled,
-                    'cancelled_at' => now(),
+                    'status' =>
+                        OrderStatus::Cancelled,
+
+                    'cancelled_at' =>
+                        now(),
                 ]);
 
                 return $lockedOrder->fresh([
@@ -318,45 +410,56 @@ class OrderController extends Controller
         );
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource($order),
         ]);
     }
 
     private function restoreOrderStock(
         Order $order
     ): void {
-        $order->loadMissing('items');
+        $order->loadMissing(
+            'items'
+        );
 
-        /*
-         * New multi-item orders.
-         */
-        if ($order->items->isNotEmpty()) {
-            $listingIds = $order->items
+        if (
+            $order->items->isNotEmpty()
+        ) {
+            $listingIds = $order
+                ->items
                 ->pluck('listing_id')
                 ->filter()
-                ->map(fn ($id) => (int) $id)
+                ->map(
+                    fn ($id) => (int) $id
+                )
                 ->unique()
                 ->sort()
                 ->values();
 
             $listings = Listing::query()
-                ->whereIn('id', $listingIds)
+                ->whereIn(
+                    'id',
+                    $listingIds
+                )
                 ->orderBy('id')
                 ->lockForUpdate()
                 ->get()
                 ->keyBy('id');
 
-            foreach ($order->items as $item) {
-                /*
-                 * listing_id is nullable on order_items because
-                 * historical items can survive listing deletion.
-                 */
-                if (! $item->listing_id) {
+            foreach (
+                $order->items
+                as $item
+            ) {
+                if (
+                    ! $item->listing_id
+                ) {
                     continue;
                 }
 
                 $listings
-                    ->get($item->listing_id)
+                    ->get(
+                        $item->listing_id
+                    )
                     ?->increment(
                         'stock',
                         $item->quantity
@@ -367,11 +470,16 @@ class OrderController extends Controller
         }
 
         /*
-         * Legacy orders created before order_items existed.
+         * Legacy order support.
          */
-        if ($order->listing_id && $order->quantity) {
+        if (
+            $order->listing_id
+            && $order->quantity
+        ) {
             Listing::query()
-                ->whereKey($order->listing_id)
+                ->whereKey(
+                    $order->listing_id
+                )
                 ->lockForUpdate()
                 ->first()
                 ?->increment(
