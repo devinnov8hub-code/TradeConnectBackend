@@ -16,18 +16,70 @@ class StoreOrderRequest extends ApiFormRequest
     public function rules(): array
     {
         return [
-            'listing_id' => ['required', 'integer', 'exists:listings,id'],
-            'quantity' => ['required', 'integer', 'min:1'],
+            'items' => ['required', 'array', 'min:1', 'max:50'],
+            'items.*.listing_id' => [
+                'required',
+                'integer',
+                'distinct',
+                'exists:listings,id',
+            ],
+            'items.*.quantity' => [
+                'required',
+                'integer',
+                'min:1',
+            ],
+
+            /*
+             * These values belong to the server.
+             *
+             * A caller must not be able to say:
+             *
+             * "This item costs ₦1"
+             * "My order total is ₦2"
+             * "My payment is already paid"
+             */
+            'listing_id' => ['prohibited'],
+            'quantity' => ['prohibited'],
+            'subtotal' => ['prohibited'],
+            'delivery_fee' => ['prohibited'],
+            'total' => ['prohibited'],
+            'status' => ['prohibited'],
+            'payment_status' => ['prohibited'],
+
+            'items.*.unit_price' => ['prohibited'],
+            'items.*.discount_amount' => ['prohibited'],
+            'items.*.line_total' => ['prohibited'],
         ];
     }
 
     public function messages(): array
     {
         return [
-            'listing_id.required' => 'Listing is required.',
-            'listing_id.exists' => 'Listing not found.',
-            'quantity.required' => 'Quantity is required.',
-            'quantity.min' => 'Quantity must be at least 1.',
+            'items.required' => 'At least one order item is required.',
+            'items.array' => 'Items must be an array.',
+            'items.min' => 'At least one order item is required.',
+            'items.max' => 'An order cannot contain more than 50 items.',
+
+            'items.*.listing_id.required' => 'Listing is required for each order item.',
+            'items.*.listing_id.exists' => 'One or more listings could not be found.',
+            'items.*.listing_id.distinct' => 'The same listing cannot appear more than once in an order.',
+
+            'items.*.quantity.required' => 'Quantity is required for each order item.',
+            'items.*.quantity.min' => 'Quantity must be at least 1.',
+
+            'listing_id.prohibited' => 'Use the items array to create an order.',
+            'quantity.prohibited' => 'Use the items array to create an order.',
+
+            'subtotal.prohibited' => 'Subtotal is calculated by the server.',
+            'delivery_fee.prohibited' => 'Delivery fee is calculated by the server.',
+            'total.prohibited' => 'Total is calculated by the server.',
+
+            'status.prohibited' => 'Order status cannot be assigned by the client.',
+            'payment_status.prohibited' => 'Payment status cannot be assigned by the client.',
+
+            'items.*.unit_price.prohibited' => 'Unit price is calculated by the server.',
+            'items.*.discount_amount.prohibited' => 'Discount amount is calculated by the server.',
+            'items.*.line_total.prohibited' => 'Line total is calculated by the server.',
         ];
     }
 
@@ -38,18 +90,41 @@ class StoreOrderRequest extends ApiFormRequest
                 return;
             }
 
-            $listing = Listing::find($this->input('listing_id'));
+            $items = collect($this->input('items', []));
 
-            if (! $listing) {
-                return;
-            }
+            $listingIds = $items
+                ->pluck('listing_id')
+                ->map(fn ($id) => (int) $id)
+                ->unique()
+                ->values();
 
-            if ($listing->status !== ListingStatus::Active) {
-                $validator->errors()->add('listing_id', 'This listing is not available.');
-            }
+            $listings = Listing::query()
+                ->whereIn('id', $listingIds)
+                ->get()
+                ->keyBy('id');
 
-            if ($listing->stock < (int) $this->input('quantity')) {
-                $validator->errors()->add('quantity', 'Insufficient stock for this listing.');
+            foreach ($items as $index => $item) {
+                $listing = $listings->get(
+                    (int) $item['listing_id']
+                );
+
+                if (! $listing) {
+                    continue;
+                }
+
+                if ($listing->status !== ListingStatus::Active) {
+                    $validator->errors()->add(
+                        "items.{$index}.listing_id",
+                        'This listing is not available.'
+                    );
+                }
+
+                if ($listing->stock < (int) $item['quantity']) {
+                    $validator->errors()->add(
+                        "items.{$index}.quantity",
+                        'Insufficient stock for this listing.'
+                    );
+                }
             }
         });
     }
