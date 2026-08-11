@@ -13,7 +13,7 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 #[Fillable([
     'user_id',
 
-    // Legacy single-item fields. Kept temporarily.
+    // Legacy single-item fields.
     'listing_id',
     'quantity',
 
@@ -27,6 +27,8 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
     'payment_status',
     'payment_provider',
     'payment_reference',
+    'payment_access_code',
+    'payment_authorization_url',
 
     'delivery_method',
     'delivery_name',
@@ -57,8 +59,11 @@ class Order extends Model
             'delivery_fee' => 'decimal:2',
             'total' => 'decimal:2',
 
-            'status' => OrderStatus::class,
-            'payment_status' => PaymentStatus::class,
+            'status' =>
+                OrderStatus::class,
+
+            'payment_status' =>
+                PaymentStatus::class,
 
             'placed_at' => 'datetime',
             'confirmed_at' => 'datetime',
@@ -76,33 +81,41 @@ class Order extends Model
 
     public function user(): BelongsTo
     {
-        return $this->belongsTo(User::class);
+        return $this->belongsTo(
+            User::class
+        );
     }
 
-    /*
-     * Legacy relationship.
-     *
-     * Existing API code still uses this. Once order creation has
-     * been migrated completely to OrderItem, this relationship
-     * can eventually be removed.
-     */
     public function listing(): BelongsTo
     {
-        return $this->belongsTo(Listing::class);
+        return $this->belongsTo(
+            Listing::class
+        );
     }
 
     public function items(): HasMany
     {
-        return $this->hasMany(OrderItem::class);
+        return $this->hasMany(
+            OrderItem::class
+        );
     }
 
     public function dispute(): HasOne
     {
-        return $this->hasOne(Dispute::class);
+        return $this->hasOne(
+            Dispute::class
+        );
     }
 
     public function isCancellable(): bool
     {
-        return $this->status === OrderStatus::New;
+        /*
+         * Until refund support exists, a paid
+         * order must not be cancelled directly.
+         */
+        return $this->status
+                === OrderStatus::New
+            && $this->payment_status
+                !== PaymentStatus::Paid;
     }
 }
