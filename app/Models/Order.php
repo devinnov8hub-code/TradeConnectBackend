@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -20,8 +21,12 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
     'subtotal',
     'delivery_fee',
     'total',
+
     'status',
+
     'payment_status',
+    'payment_provider',
+    'payment_reference',
 
     'delivery_method',
     'delivery_name',
@@ -38,6 +43,10 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
     'deliver_by',
     'delivered_at',
     'cancelled_at',
+
+    'paid_at',
+    'payment_failed_at',
+    'refunded_at',
 ])]
 class Order extends Model
 {
@@ -49,6 +58,7 @@ class Order extends Model
             'total' => 'decimal:2',
 
             'status' => OrderStatus::class,
+            'payment_status' => PaymentStatus::class,
 
             'placed_at' => 'datetime',
             'confirmed_at' => 'datetime',
@@ -57,6 +67,10 @@ class Order extends Model
             'deliver_by' => 'datetime',
             'delivered_at' => 'datetime',
             'cancelled_at' => 'datetime',
+
+            'paid_at' => 'datetime',
+            'payment_failed_at' => 'datetime',
+            'refunded_at' => 'datetime',
         ];
     }
 
@@ -68,8 +82,9 @@ class Order extends Model
     /*
      * Legacy relationship.
      *
-     * Existing API code still uses this. Once order creation has been
-     * migrated completely to OrderItem, this relationship can be removed.
+     * Existing API code still uses this. Once order creation has
+     * been migrated completely to OrderItem, this relationship
+     * can eventually be removed.
      */
     public function listing(): BelongsTo
     {
