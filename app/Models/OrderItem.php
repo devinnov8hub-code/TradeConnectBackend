@@ -2,40 +2,42 @@
 
 namespace App\Models;
 
-use App\Enums\ListingStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable([
+    'order_id',
+    'listing_id',
     'farmer_id',
     'produce_id',
-    'price',
-    'stock',
-    'status',
+    'produce_name',
+    'category_name',
+    'unit',
+    'quantity',
+    'unit_price',
+    'discount_amount',
+    'line_total',
 ])]
-class Listing extends Model
+class OrderItem extends Model
 {
     protected function casts(): array
     {
         return [
-            'price' => 'decimal:2',
-            'status' => ListingStatus::class,
+            'unit_price' => 'decimal:2',
+            'discount_amount' => 'decimal:2',
+            'line_total' => 'decimal:2',
         ];
     }
 
-    /*
-     * Legacy single-listing order relationship.
-     */
-    public function orders(): HasMany
+    public function order(): BelongsTo
     {
-        return $this->hasMany(Order::class);
+        return $this->belongsTo(Order::class);
     }
 
-    public function orderItems(): HasMany
+    public function listing(): BelongsTo
     {
-        return $this->hasMany(OrderItem::class);
+        return $this->belongsTo(Listing::class);
     }
 
     public function farmer(): BelongsTo

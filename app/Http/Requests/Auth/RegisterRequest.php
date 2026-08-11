@@ -42,3 +42,4 @@ class RegisterRequest extends ApiFormRequest
         ];
     }
 }
+
