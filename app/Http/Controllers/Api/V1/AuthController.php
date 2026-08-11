@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\RegisterRequest;
+use App\Enums\UserRole;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -13,7 +14,10 @@ class AuthController extends Controller
 {
     public function register(RegisterRequest $request): JsonResponse
     {
-        $user = User::create($request->safe()->only(['name', 'email', 'password', 'role']));
+        $data = $request->safe()->only(['name', 'email', 'password']);
+$data['role'] = UserRole::User->value;
+
+$user = User::create($data);
 
         $token = auth('api')->login($user);
 

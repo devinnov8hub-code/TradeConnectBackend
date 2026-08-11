@@ -11,14 +11,13 @@ class AuthenticationTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_user_can_register_with_role(): void
+    public function test_user_can_register_and_is_assigned_user_role(): void
     {
         $response = $this->postJson('/api/v1/register', [
             'name' => 'Jane Doe',
             'email' => 'jane@example.com',
             'password' => 'password',
             'password_confirmation' => 'password',
-            'role' => UserRole::User->value,
         ]);
 
         $response->assertCreated()
@@ -33,6 +32,24 @@ class AuthenticationTest extends TestCase
         $this->assertDatabaseHas('users', [
             'email' => 'jane@example.com',
             'role' => UserRole::User->value,
+        ]);
+    }
+
+    public function test_public_registration_cannot_assign_admin_role(): void
+    {
+        $response = $this->postJson('/api/v1/register', [
+            'name' => 'Sneaky Admin',
+            'email' => 'admin@example.com',
+            'password' => 'password',
+            'password_confirmation' => 'password',
+            'role' => UserRole::Admin->value,
+        ]);
+
+        $response->assertUnprocessable()
+            ->assertJsonValidationErrors(['role']);
+
+        $this->assertDatabaseMissing('users', [
+            'email' => 'admin@example.com',
         ]);
     }
 
@@ -61,6 +78,7 @@ class AuthenticationTest extends TestCase
             'role' => UserRole::User,
             'email' => 'jane@example.com',
         ]);
+
         $token = auth('api')->login($user);
 
         $response = $this->withToken($token)->getJson('/api/v1/me');
@@ -73,7 +91,10 @@ class AuthenticationTest extends TestCase
 
     public function test_authenticated_admin_can_get_their_profile(): void
     {
-        $admin = User::factory()->create(['role' => UserRole::Admin]);
+        $admin = User::factory()->create([
+            'role' => UserRole::Admin,
+        ]);
+
         $token = auth('api')->login($admin);
 
         $response = $this->withToken($token)->getJson('/api/v1/me');
@@ -86,7 +107,9 @@ class AuthenticationTest extends TestCase
     {
         $this->getJson('/api/v1/me')
             ->assertUnauthorized()
-            ->assertJson(['message' => 'Unauthenticated.']);
+            ->assertJson([
+                'message' => 'Unauthenticated.',
+            ]);
     }
 
     public function test_login_fails_with_invalid_credentials(): void
@@ -102,6 +125,8 @@ class AuthenticationTest extends TestCase
         ]);
 
         $response->assertUnauthorized()
-            ->assertJson(['message' => 'Invalid credentials.']);
+            ->assertJson([
+                'message' => 'Invalid credentials.',
+            ]);
     }
 }
