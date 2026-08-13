@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\V1\Admin\DashboardController;
 use App\Http\Controllers\Api\V1\Admin\DisputeController as AdminDisputeController;
 use App\Http\Controllers\Api\V1\Admin\FarmerController;
 use App\Http\Controllers\Api\V1\Admin\ListingController as AdminListingController;
+use App\Http\Controllers\Api\V1\Admin\ListingImageController as AdminListingImageController;
 use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
 use App\Http\Controllers\Api\V1\Admin\ProduceController;
 use App\Http\Controllers\Api\V1\Admin\UserController;
@@ -16,7 +17,6 @@ use App\Http\Controllers\Api\V1\OrderController;
 use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Middleware\EnsureUserIsActive;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\V1\Admin\ListingImageController as AdminListingImageController;
 
 Route::prefix('v1')->group(function () {
     Route::get('/health', function () {
@@ -46,6 +46,9 @@ Route::prefix('v1')->group(function () {
         [ListingController::class, 'show']
     );
 
+    /*
+     * Authenticated buyer/user routes.
+     */
     Route::middleware([
         'auth:api',
         EnsureUserIsActive::class,
@@ -56,6 +59,9 @@ Route::prefix('v1')->group(function () {
                 [AuthController::class, 'me']
             );
 
+            /*
+             * Buyer orders.
+             */
             Route::get(
                 'orders',
                 [OrderController::class, 'index']
@@ -92,19 +98,43 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
+            /*
+             * Buyer disputes.
+             */
             Route::get(
                 'disputes',
-                [DisputeController::class, 'index']
+                [
+                    DisputeController::class,
+                    'index',
+                ]
             );
 
             Route::post(
                 'disputes',
-                [DisputeController::class, 'store']
+                [
+                    DisputeController::class,
+                    'store',
+                ]
             );
 
             Route::get(
                 'disputes/{dispute}',
-                [DisputeController::class, 'show']
+                [
+                    DisputeController::class,
+                    'show',
+                ]
+            );
+
+            /*
+             * Mark the authenticated buyer's own
+             * dispute read state.
+             */
+            Route::patch(
+                'disputes/{dispute}/read',
+                [
+                    DisputeController::class,
+                    'markRead',
+                ]
             );
 
             Route::post(
@@ -116,6 +146,9 @@ Route::prefix('v1')->group(function () {
             );
         });
 
+    /*
+     * Admin routes.
+     */
     Route::middleware([
         'auth:api',
         EnsureUserIsActive::class,
@@ -128,6 +161,9 @@ Route::prefix('v1')->group(function () {
                 DashboardController::class
             );
 
+            /*
+             * Catalog.
+             */
             Route::apiResource(
                 'categories',
                 CategoryController::class
@@ -138,6 +174,9 @@ Route::prefix('v1')->group(function () {
                 ProduceController::class
             );
 
+            /*
+             * Farmers.
+             */
             Route::patch(
                 'farmers/{farmer}/status',
                 [
@@ -159,6 +198,9 @@ Route::prefix('v1')->group(function () {
                 FarmerController::class
             );
 
+            /*
+             * Listings.
+             */
             Route::get(
                 'listings',
                 [
@@ -167,11 +209,29 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
-            Route::post('listings/{listing}/images', [AdminListingImageController::class, 'store']);
+            Route::post(
+                'listings/{listing}/images',
+                [
+                    AdminListingImageController::class,
+                    'store',
+                ]
+            );
 
-            Route::patch('listings/{listing}/images/reorder', [AdminListingImageController::class, 'reorder']);
+            Route::patch(
+                'listings/{listing}/images/reorder',
+                [
+                    AdminListingImageController::class,
+                    'reorder',
+                ]
+            );
 
-            Route::delete('listings/{listing}/images/{listingImage}', [AdminListingImageController::class, 'destroy']);
+            Route::delete(
+                'listings/{listing}/images/{listingImage}',
+                [
+                    AdminListingImageController::class,
+                    'destroy',
+                ]
+            );
 
             Route::get(
                 'listings/{listing}',
@@ -221,6 +281,9 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
+            /*
+             * Orders.
+             */
             Route::get(
                 'farmers/{farmer}/orders',
                 [
@@ -253,19 +316,31 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
+            /*
+             * Users and buyers.
+             */
             Route::get(
                 'users',
-                [UserController::class, 'index']
+                [
+                    UserController::class,
+                    'index',
+                ]
             );
 
             Route::get(
                 'users/{user}',
-                [UserController::class, 'show']
+                [
+                    UserController::class,
+                    'show',
+                ]
             );
 
             Route::get(
                 'buyers',
-                [BuyerController::class, 'index']
+                [
+                    BuyerController::class,
+                    'index',
+                ]
             );
 
             Route::patch(
@@ -278,9 +353,15 @@ Route::prefix('v1')->group(function () {
 
             Route::get(
                 'buyers/{buyer}',
-                [BuyerController::class, 'show']
+                [
+                    BuyerController::class,
+                    'show',
+                ]
             );
 
+            /*
+             * Admin disputes.
+             */
             Route::get(
                 'disputes',
                 [
@@ -294,6 +375,18 @@ Route::prefix('v1')->group(function () {
                 [
                     AdminDisputeController::class,
                     'show',
+                ]
+            );
+
+            /*
+             * Mark this admin's independent dispute
+             * read state.
+             */
+            Route::patch(
+                'disputes/{dispute}/read',
+                [
+                    AdminDisputeController::class,
+                    'markRead',
                 ]
             );
 
