@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1\Admin;
 use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerRequest;
 use App\Http\Requests\Admin\StoreFarmerRequest;
 use App\Http\Requests\Admin\UpdateFarmerRequest;
 use App\Http\Resources\FarmerResource;
@@ -18,19 +19,119 @@ use Illuminate\Http\JsonResponse;
 
 class FarmerController extends Controller
 {
-    public function index(): JsonResponse
-    {
+    public function index(
+        IndexFarmerRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'name'
+        ) ?? 'name';
+
+        $order = $request->validated(
+            'order',
+            'asc'
+        ) ?? 'asc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
         $farmers = Farmer::query()
             ->withCount('listings')
-            ->orderBy('name')
-            ->get();
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
 
-        return response()->json([
-            'data' =>
-                FarmerResource::collection(
-                    $farmers
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'name',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'farmer_code',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'email',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'phone_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'farm_name',
+                                    'like',
+                                    $search
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('state'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'state',
+                        $request->validated('state')
+                    )
+            )
+            ->when(
+                $request->filled('lga'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'lga',
+                        $request->validated('lga')
+                    )
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'status',
+                        $request->validated('status')
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'verification_status'
                 ),
-        ]);
+                fn (Builder $query) =>
+                    $query->where(
+                        'verification_status',
+                        $request->validated(
+                            'verification_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                $sort,
+                strtolower($order) === 'desc'
+                    ? 'desc'
+                    : 'asc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return FarmerResource::collection(
+            $farmers
+        )->response();
     }
 
     public function store(
