@@ -210,6 +210,14 @@ Route::prefix('v1')->group(function () {
             );
 
             Route::get(
+                'farmers/{farmer}/orders',
+                [
+                    AdminOrderController::class,
+                    'farmerIndex',
+                ]
+            );
+
+            Route::get(
                 'orders',
                 [
                     AdminOrderController::class,

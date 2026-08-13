@@ -5,10 +5,13 @@ namespace App\Http\Controllers\Api\V1\Admin;
 use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerOrderRequest;
 use App\Http\Requests\Admin\UpdateOrderStatusRequest;
 use App\Http\Resources\OrderResource;
+use App\Models\Farmer;
 use App\Models\Listing;
 use App\Models\Order;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -32,8 +35,184 @@ class OrderController extends Controller
             ->get();
 
         return response()->json([
-            'data' => OrderResource::collection($orders),
+            'data' =>
+                OrderResource::collection(
+                    $orders
+                ),
         ]);
+    }
+
+    public function farmerIndex(
+        IndexFarmerOrderRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        /*
+         * A parent order belongs in this farmer's order
+         * history when at least one order item belongs
+         * to the farmer.
+         *
+         * We deliberately do not rely on orders.listing_id
+         * because one parent order can contain items from
+         * multiple farmers.
+         */
+        $orders = Order::query()
+            ->whereHas(
+                'items',
+                fn (Builder $query) =>
+                    $query->where(
+                        'farmer_id',
+                        $farmer->id
+                    )
+            )
+            ->with([
+                'user',
+
+                'items.produce.category',
+                'items.farmer',
+
+                // Legacy compatibility.
+                'listing.produce.category',
+                'listing.farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use (
+                    $request,
+                    $farmer
+                ): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use (
+                            $search,
+                            $farmer
+                        ): void {
+                            $query
+                                ->where(
+                                    'orders.order_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'user',
+                                    function (
+                                        Builder $userQuery
+                                    ) use ($search): void {
+                                        $userQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'email',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'items',
+                                    function (
+                                        Builder $itemQuery
+                                    ) use (
+                                        $farmer,
+                                        $search
+                                    ): void {
+                                        /*
+                                         * Search only this farmer's
+                                         * item snapshots.
+                                         *
+                                         * This prevents a product
+                                         * belonging to another farmer
+                                         * in the same parent order from
+                                         * matching this farmer's search.
+                                         */
+                                        $itemQuery
+                                            ->where(
+                                                'farmer_id',
+                                                $farmer->id
+                                            )
+                                            ->where(
+                                                function (
+                                                    Builder $query
+                                                ) use ($search): void {
+                                                    $query
+                                                        ->where(
+                                                            'produce_name',
+                                                            'like',
+                                                            $search
+                                                        )
+                                                        ->orWhere(
+                                                            'category_name',
+                                                            'like',
+                                                            $search
+                                                        );
+                                                }
+                                            );
+                                    }
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'payment_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.payment_status',
+                        $request->validated(
+                            'payment_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                'orders.'.$sort,
+                strtolower($order) === 'asc'
+                    ? 'asc'
+                    : 'desc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return OrderResource::collection(
+            $orders
+        )->response();
     }
 
     public function show(
@@ -51,7 +230,8 @@ class OrderController extends Controller
         ]);
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource($order),
         ]);
     }
 
@@ -91,7 +271,8 @@ class OrderController extends Controller
          */
         if (
             $newStatus === OrderStatus::Cancelled
-            && $order->payment_status === PaymentStatus::Paid
+            && $order->payment_status
+                === PaymentStatus::Paid
         ) {
             return response()->json([
                 'message' =>
@@ -216,7 +397,8 @@ class OrderController extends Controller
         );
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource($order),
         ]);
     }
 
