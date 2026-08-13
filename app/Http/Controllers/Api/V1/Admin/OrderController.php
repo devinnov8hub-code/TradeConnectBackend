@@ -6,6 +6,7 @@ use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\IndexFarmerOrderRequest;
+use App\Http\Requests\Admin\IndexOrderRequest;
 use App\Http\Requests\Admin\UpdateOrderStatusRequest;
 use App\Http\Resources\OrderResource;
 use App\Models\Farmer;
@@ -18,8 +19,27 @@ use Illuminate\Validation\ValidationException;
 
 class OrderController extends Controller
 {
-    public function index(): JsonResponse
-    {
+    
+    public function index(
+        IndexOrderRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
         $orders = Order::query()
             ->with([
                 'user',
@@ -31,15 +51,140 @@ class OrderController extends Controller
                 'listing.produce.category',
                 'listing.farmer',
             ])
-            ->orderByDesc('created_at')
-            ->get();
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
 
-        return response()->json([
-            'data' =>
-                OrderResource::collection(
-                    $orders
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'orders.order_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'user',
+                                    function (
+                                        Builder $userQuery
+                                    ) use ($search): void {
+                                        $userQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'email',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'items',
+                                    function (
+                                        Builder $itemQuery
+                                    ) use ($search): void {
+                                        $itemQuery->where(
+                                            function (
+                                                Builder $query
+                                            ) use ($search): void {
+                                                $query
+                                                    ->where(
+                                                        'produce_name',
+                                                        'like',
+                                                        $search
+                                                    )
+                                                    ->orWhere(
+                                                        'category_name',
+                                                        'like',
+                                                        $search
+                                                    );
+                                            }
+                                        );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'items.farmer',
+                                    function (
+                                        Builder $farmerQuery
+                                    ) use ($search): void {
+                                        $farmerQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'farmer_code',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'payment_status'
                 ),
-        ]);
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.payment_status',
+                        $request->validated(
+                            'payment_status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled('farmer_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'items',
+                        fn (Builder $itemQuery) =>
+                            $itemQuery->where(
+                                'farmer_id',
+                                $request->validated(
+                                    'farmer_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->orderBy(
+                'orders.'.$sort,
+                strtolower($order) === 'asc'
+                    ? 'asc'
+                    : 'desc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return OrderResource::collection(
+            $orders
+        )->response();
     }
 
     public function farmerIndex(
@@ -142,15 +287,6 @@ class OrderController extends Controller
                                         $farmer,
                                         $search
                                     ): void {
-                                        /*
-                                         * Search only this farmer's
-                                         * item snapshots.
-                                         *
-                                         * This prevents a product
-                                         * belonging to another farmer
-                                         * in the same parent order from
-                                         * matching this farmer's search.
-                                         */
                                         $itemQuery
                                             ->where(
                                                 'farmer_id',
@@ -285,24 +421,11 @@ class OrderController extends Controller
                 $order,
                 $newStatus
             ): Order {
-                /*
-                 * Reload and lock the order inside the transaction.
-                 *
-                 * This ensures nobody else can modify the same
-                 * order while we're changing its status.
-                 */
                 $lockedOrder = Order::query()
                     ->whereKey($order->id)
                     ->lockForUpdate()
                     ->firstOrFail();
 
-                /*
-                 * Repeat the paid-order cancellation check after
-                 * acquiring the database lock.
-                 *
-                 * The order may have changed between the original
-                 * request check and this transaction.
-                 */
                 if (
                     $newStatus === OrderStatus::Cancelled
                     && $lockedOrder->payment_status
@@ -315,10 +438,6 @@ class OrderController extends Controller
                     ]);
                 }
 
-                /*
-                 * Also check the current status again after
-                 * acquiring the database lock.
-                 */
                 if (
                     in_array(
                         $lockedOrder->status,
@@ -432,11 +551,6 @@ class OrderController extends Controller
                 ->keyBy('id');
 
             foreach ($order->items as $item) {
-                /*
-                 * order_items.listing_id is nullable because
-                 * historical order items may survive if a
-                 * listing is deleted later.
-                 */
                 if (! $item->listing_id) {
                     continue;
                 }
