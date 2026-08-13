@@ -11,16 +11,25 @@ use App\Http\Requests\Dispute\StoreDisputeRequest;
 use App\Http\Resources\DisputeMessageResource;
 use App\Http\Resources\DisputeResource;
 use App\Models\Dispute;
+use App\Models\DisputeMessageAttachment;
 use App\Models\Order;
 use App\Models\User;
+use App\Services\DisputeAttachmentService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class DisputeController extends Controller
 {
+    public function __construct(
+        private readonly DisputeAttachmentService $attachmentService
+    ) {
+    }
+
     public function index(
         IndexDisputeRequest $request
     ): JsonResponse {
@@ -62,6 +71,7 @@ class DisputeController extends Controller
                     'affectedOrderItem.farmer',
 
                     'lastMessage.user',
+                    'lastMessage.attachments',
 
                     'resolvedBy',
                     'closedBy',
@@ -252,64 +262,95 @@ class DisputeController extends Controller
             }
         }
 
-        $dispute =
-            DB::transaction(
-                function () use (
-                    $request,
-                    $order,
-                    $affectedOrderItem
-                ): Dispute {
-                    $dispute =
-                        Dispute::create([
-                            'order_id' =>
-                                $order->id,
+        $storedPaths = [];
 
-                            'order_item_id' =>
-                                $affectedOrderItem?->id,
+        try {
+            $dispute =
+                DB::transaction(
+                    function () use (
+                        $request,
+                        $order,
+                        $affectedOrderItem,
+                        &$storedPaths
+                    ): Dispute {
+                        $dispute =
+                            Dispute::create([
+                                'order_id' =>
+                                    $order->id,
 
-                            'user_id' =>
-                                $request
-                                    ->user()
-                                    ->id,
+                                'order_item_id' =>
+                                    $affectedOrderItem?->id,
 
-                            'subject' =>
-                                $request
-                                    ->validated(
-                                        'subject'
-                                    ),
-
-                            'status' =>
-                                DisputeStatus::UnderReview,
-                        ]);
-
-                    $message =
-                        $dispute
-                            ->messages()
-                            ->create([
                                 'user_id' =>
                                     $request
                                         ->user()
                                         ->id,
 
-                                'body' =>
+                                'subject' =>
                                     $request
                                         ->validated(
-                                            'message'
+                                            'subject'
                                         ),
+
+                                'status' =>
+                                    DisputeStatus::UnderReview,
                             ]);
 
-                    /*
-                     * A user has necessarily read the
-                     * message they just submitted.
-                     */
-                    $dispute->markReadBy(
-                        $request->user(),
-                        $message
-                    );
+                        $message =
+                            $dispute
+                                ->messages()
+                                ->create([
+                                    'user_id' =>
+                                        $request
+                                            ->user()
+                                            ->id,
 
-                    return $dispute;
-                }
-            );
+                                    'body' =>
+                                        $request
+                                            ->validated(
+                                                'message'
+                                            ),
+                                ]);
+
+                        $dispute->markReadBy(
+                            $request->user(),
+                            $message
+                        );
+
+                        /*
+                         * Store files last so there are no
+                         * later business operations that can
+                         * fail after successful filesystem
+                         * writes.
+                         */
+                        $storedPaths =
+                            $this
+                                ->attachmentService
+                                ->storeForMessage(
+                                    $message,
+                                    $request->file(
+                                        'attachments',
+                                        []
+                                    )
+                                );
+
+                        return $dispute;
+                    }
+                );
+        } catch (Throwable $exception) {
+            /*
+             * Also handles the rare case where database
+             * transaction commit itself fails after files
+             * were successfully written.
+             */
+            $this
+                ->attachmentService
+                ->deletePaths(
+                    $storedPaths
+                );
+
+            throw $exception;
+        }
 
         $this->prepareForViewer(
             $dispute,
@@ -375,40 +416,65 @@ class DisputeController extends Controller
             ], 422);
         }
 
-        $message =
-            DB::transaction(
-                function () use (
-                    $request,
-                    $dispute
-                ) {
-                    $message =
-                        $dispute
-                            ->messages()
-                            ->create([
-                                'user_id' =>
-                                    $request
-                                        ->user()
-                                        ->id,
+        $storedPaths = [];
 
-                                'body' =>
-                                    $request
-                                        ->validated(
-                                            'message'
-                                        ),
-                            ]);
+        try {
+            $message =
+                DB::transaction(
+                    function () use (
+                        $request,
+                        $dispute,
+                        &$storedPaths
+                    ) {
+                        $message =
+                            $dispute
+                                ->messages()
+                                ->create([
+                                    'user_id' =>
+                                        $request
+                                            ->user()
+                                            ->id,
 
-                    $dispute->markReadBy(
-                        $request->user(),
-                        $message
-                    );
+                                    'body' =>
+                                        $request
+                                            ->validated(
+                                                'message'
+                                            ),
+                                ]);
 
-                    return $message;
-                }
-            );
+                        $dispute->markReadBy(
+                            $request->user(),
+                            $message
+                        );
 
-        $message->load(
-            'user'
-        );
+                        $storedPaths =
+                            $this
+                                ->attachmentService
+                                ->storeForMessage(
+                                    $message,
+                                    $request->file(
+                                        'attachments',
+                                        []
+                                    )
+                                );
+
+                        return $message;
+                    }
+                );
+        } catch (Throwable $exception) {
+            $this
+                ->attachmentService
+                ->deletePaths(
+                    $storedPaths
+                );
+
+            throw $exception;
+        }
+
+        $message->load([
+            'user',
+            'attachments',
+        ]);
 
         return response()->json([
             'data' =>
@@ -449,6 +515,73 @@ class DisputeController extends Controller
         ]);
     }
 
+    public function downloadAttachment(
+        Request $request,
+        Dispute $dispute,
+        DisputeMessageAttachment $attachment
+    ) {
+        /*
+         * A buyer may download evidence only from their
+         * own dispute.
+         */
+        if (
+            $dispute->user_id
+            !== $request->user()->id
+        ) {
+            return response()->json([
+                'message' =>
+                    'Attachment not found.',
+            ], 404);
+        }
+
+        $attachment->loadMissing(
+            'message'
+        );
+
+        /*
+         * Route model binding does not automatically
+         * guarantee this attachment belongs to the
+         * dispute in the URL.
+         */
+        if (
+            ! $attachment->message
+            || $attachment
+                ->message
+                ->dispute_id
+            !== $dispute->id
+        ) {
+            return response()->json([
+                'message' =>
+                    'Attachment not found.',
+            ], 404);
+        }
+
+        if (
+            ! Storage::disk(
+                'local'
+            )->exists(
+                $attachment->path
+            )
+        ) {
+            return response()->json([
+                'message' =>
+                    'Attachment not found.',
+            ], 404);
+        }
+
+        return Storage::disk(
+            'local'
+        )->download(
+            $attachment->path,
+            $attachment->original_name,
+            [
+                'Content-Type' =>
+                    $attachment
+                        ->mime_type,
+            ]
+        );
+    }
+
     private function prepareForViewer(
         Dispute $dispute,
         User $viewer
@@ -466,6 +599,7 @@ class DisputeController extends Controller
                 'affectedOrderItem.farmer',
 
                 'lastMessage.user',
+                'lastMessage.attachments',
 
                 'resolvedBy',
                 'closedBy',
@@ -473,7 +607,10 @@ class DisputeController extends Controller
                 'messages' =>
                     fn ($query) =>
                         $query
-                            ->with('user')
+                            ->with([
+                                'user',
+                                'attachments',
+                            ])
                             ->orderBy(
                                 'created_at'
                             )

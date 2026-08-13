@@ -46,9 +46,6 @@ Route::prefix('v1')->group(function () {
         [ListingController::class, 'show']
     );
 
-    /*
-     * Authenticated buyer/user routes.
-     */
     Route::middleware([
         'auth:api',
         EnsureUserIsActive::class,
@@ -59,9 +56,6 @@ Route::prefix('v1')->group(function () {
                 [AuthController::class, 'me']
             );
 
-            /*
-             * Buyer orders.
-             */
             Route::get(
                 'orders',
                 [OrderController::class, 'index']
@@ -125,10 +119,6 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
-            /*
-             * Mark the authenticated buyer's own
-             * dispute read state.
-             */
             Route::patch(
                 'disputes/{dispute}/read',
                 [
@@ -144,11 +134,19 @@ Route::prefix('v1')->group(function () {
                     'storeMessage',
                 ]
             );
+
+            Route::get(
+                'disputes/{dispute}/attachments/{attachment}',
+                [
+                    DisputeController::class,
+                    'downloadAttachment',
+                ]
+            )
+                ->name(
+                    'disputes.attachments.download'
+                );
         });
 
-    /*
-     * Admin routes.
-     */
     Route::middleware([
         'auth:api',
         EnsureUserIsActive::class,
@@ -161,9 +159,6 @@ Route::prefix('v1')->group(function () {
                 DashboardController::class
             );
 
-            /*
-             * Catalog.
-             */
             Route::apiResource(
                 'categories',
                 CategoryController::class
@@ -174,9 +169,6 @@ Route::prefix('v1')->group(function () {
                 ProduceController::class
             );
 
-            /*
-             * Farmers.
-             */
             Route::patch(
                 'farmers/{farmer}/status',
                 [
@@ -198,9 +190,6 @@ Route::prefix('v1')->group(function () {
                 FarmerController::class
             );
 
-            /*
-             * Listings.
-             */
             Route::get(
                 'listings',
                 [
@@ -281,9 +270,6 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
-            /*
-             * Orders.
-             */
             Route::get(
                 'farmers/{farmer}/orders',
                 [
@@ -316,9 +302,6 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
-            /*
-             * Users and buyers.
-             */
             Route::get(
                 'users',
                 [
@@ -378,10 +361,6 @@ Route::prefix('v1')->group(function () {
                 ]
             );
 
-            /*
-             * Mark this admin's independent dispute
-             * read state.
-             */
             Route::patch(
                 'disputes/{dispute}/read',
                 [
@@ -397,6 +376,17 @@ Route::prefix('v1')->group(function () {
                     'storeMessage',
                 ]
             );
+
+            Route::get(
+                'disputes/{dispute}/attachments/{attachment}',
+                [
+                    AdminDisputeController::class,
+                    'downloadAttachment',
+                ]
+            )
+                ->name(
+                    'admin.disputes.attachments.download'
+                );
 
             Route::patch(
                 'disputes/{dispute}',

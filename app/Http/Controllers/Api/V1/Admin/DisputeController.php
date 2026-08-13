@@ -10,15 +10,24 @@ use App\Http\Requests\Dispute\StoreDisputeMessageRequest;
 use App\Http\Resources\DisputeMessageResource;
 use App\Http\Resources\DisputeResource;
 use App\Models\Dispute;
+use App\Models\DisputeMessageAttachment;
 use App\Models\User;
+use App\Services\DisputeAttachmentService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class DisputeController extends Controller
 {
+    public function __construct(
+        private readonly DisputeAttachmentService $attachmentService
+    ) {
+    }
+
     public function index(
         IndexDisputeRequest $request
     ): JsonResponse {
@@ -59,6 +68,7 @@ class DisputeController extends Controller
                     'affectedOrderItem.farmer',
 
                     'lastMessage.user',
+                    'lastMessage.attachments',
 
                     'resolvedBy',
                     'closedBy',
@@ -239,44 +249,65 @@ class DisputeController extends Controller
             ], 422);
         }
 
-        $message =
-            DB::transaction(
-                function () use (
-                    $request,
-                    $dispute
-                ) {
-                    $message =
-                        $dispute
-                            ->messages()
-                            ->create([
-                                'user_id' =>
-                                    $request
-                                        ->user()
-                                        ->id,
+        $storedPaths = [];
 
-                                'body' =>
-                                    $request
-                                        ->validated(
-                                            'message'
-                                        ),
-                            ]);
+        try {
+            $message =
+                DB::transaction(
+                    function () use (
+                        $request,
+                        $dispute,
+                        &$storedPaths
+                    ) {
+                        $message =
+                            $dispute
+                                ->messages()
+                                ->create([
+                                    'user_id' =>
+                                        $request
+                                            ->user()
+                                            ->id,
 
-                    /*
-                     * Replying means the sender has read
-                     * the thread through their own reply.
-                     */
-                    $dispute->markReadBy(
-                        $request->user(),
-                        $message
-                    );
+                                    'body' =>
+                                        $request
+                                            ->validated(
+                                                'message'
+                                            ),
+                                ]);
 
-                    return $message;
-                }
-            );
+                        $dispute->markReadBy(
+                            $request->user(),
+                            $message
+                        );
 
-        $message->load(
-            'user'
-        );
+                        $storedPaths =
+                            $this
+                                ->attachmentService
+                                ->storeForMessage(
+                                    $message,
+                                    $request->file(
+                                        'attachments',
+                                        []
+                                    )
+                                );
+
+                        return $message;
+                    }
+                );
+        } catch (Throwable $exception) {
+            $this
+                ->attachmentService
+                ->deletePaths(
+                    $storedPaths
+                );
+
+            throw $exception;
+        }
+
+        $message->load([
+            'user',
+            'attachments',
+        ]);
 
         return response()->json([
             'data' =>
@@ -433,6 +464,54 @@ class DisputeController extends Controller
         ]);
     }
 
+    public function downloadAttachment(
+        Request $request,
+        Dispute $dispute,
+        DisputeMessageAttachment $attachment
+    ) {
+        $attachment->loadMissing(
+            'message'
+        );
+
+        if (
+            ! $attachment->message
+            || $attachment
+                ->message
+                ->dispute_id
+            !== $dispute->id
+        ) {
+            return response()->json([
+                'message' =>
+                    'Attachment not found.',
+            ], 404);
+        }
+
+        if (
+            ! Storage::disk(
+                'local'
+            )->exists(
+                $attachment->path
+            )
+        ) {
+            return response()->json([
+                'message' =>
+                    'Attachment not found.',
+            ], 404);
+        }
+
+        return Storage::disk(
+            'local'
+        )->download(
+            $attachment->path,
+            $attachment->original_name,
+            [
+                'Content-Type' =>
+                    $attachment
+                        ->mime_type,
+            ]
+        );
+    }
+
     private function prepareForViewer(
         Dispute $dispute,
         User $viewer
@@ -450,6 +529,7 @@ class DisputeController extends Controller
                 'affectedOrderItem.farmer',
 
                 'lastMessage.user',
+                'lastMessage.attachments',
 
                 'resolvedBy',
                 'closedBy',
@@ -457,7 +537,10 @@ class DisputeController extends Controller
                 'messages' =>
                     fn ($query) =>
                         $query
-                            ->with('user')
+                            ->with([
+                                'user',
+                                'attachments',
+                            ])
                             ->orderBy(
                                 'created_at'
                             )
