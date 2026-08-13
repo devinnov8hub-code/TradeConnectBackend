@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\V1\DisputeController;
 use App\Http\Controllers\Api\V1\ListingController;
 use App\Http\Controllers\Api\V1\OrderController;
 use App\Http\Controllers\Api\V1\PaymentController;
+use App\Http\Middleware\EnsureUserIsActive;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -44,7 +45,10 @@ Route::prefix('v1')->group(function () {
         [ListingController::class, 'show']
     );
 
-    Route::middleware('auth:api')
+    Route::middleware([
+        'auth:api',
+        EnsureUserIsActive::class,
+    ])
         ->group(function () {
             Route::get(
                 'me',
@@ -113,6 +117,7 @@ Route::prefix('v1')->group(function () {
 
     Route::middleware([
         'auth:api',
+        EnsureUserIsActive::class,
         'admin',
     ])
         ->prefix('admin')
