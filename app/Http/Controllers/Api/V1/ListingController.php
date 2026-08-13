@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\FarmerStatus;
+use App\Enums\ListingPublicationStatus;
 use App\Enums\ListingStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Listing\IndexListingRequest;
@@ -32,22 +34,62 @@ class ListingController extends Controller
             ) ?? 20
         );
 
+        $today =
+            now()
+                ->startOfDay()
+                ->toDateString();
+
         $listings = Listing::query()
             ->with([
                 'produce.category',
                 'farmer',
             ])
+
+            /*
+             * Marketplace visibility.
+             *
+             * publication_status is the new preferred
+             * state while status remains temporarily
+             * checked for compatibility/safety.
+             */
             ->where(
-                'status',
-                ListingStatus::Active
+                'listings.publication_status',
+                ListingPublicationStatus::Live
+                    ->value
             )
+            ->where(
+                'listings.status',
+                ListingStatus::Active
+                    ->value
+            )
+
+            /*
+             * A listing belonging to an inactive farmer
+             * should not remain visible even if its own
+             * publication state still says live.
+             */
+            ->whereHas(
+                'farmer',
+                fn (Builder $query) =>
+                    $query->where(
+                        'status',
+                        FarmerStatus::Active
+                            ->value
+                    )
+            )
+
+            /*
+             * Rich marketplace search.
+             */
             ->when(
                 $request->filled('search'),
                 function (
                     Builder $query
                 ) use ($request): void {
                     $search = '%'
-                        .$request->validated('search')
+                        .$request->validated(
+                            'search'
+                        )
                         .'%';
 
                     $query->where(
@@ -55,19 +97,30 @@ class ListingController extends Controller
                             Builder $query
                         ) use ($search): void {
                             $query
-                                ->whereHas(
-                                    'produce',
-                                    fn (Builder $q) =>
-                                        $q->where(
-                                            'name',
-                                            'like',
-                                            $search
-                                        )
+                                ->where(
+                                    'listings.description',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'listings.label',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'listings.grade',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'listings.unit',
+                                    'like',
+                                    $search
                                 )
                                 ->orWhereHas(
-                                    'farmer',
-                                    fn (Builder $q) =>
-                                        $q->where(
+                                    'produce',
+                                    fn (Builder $produceQuery) =>
+                                        $produceQuery->where(
                                             'name',
                                             'like',
                                             $search
@@ -75,26 +128,55 @@ class ListingController extends Controller
                                 )
                                 ->orWhereHas(
                                     'produce.category',
-                                    fn (Builder $q) =>
-                                        $q->where(
+                                    fn (Builder $categoryQuery) =>
+                                        $categoryQuery->where(
                                             'name',
                                             'like',
                                             $search
                                         )
+                                )
+                                ->orWhereHas(
+                                    'farmer',
+                                    function (
+                                        Builder $farmerQuery
+                                    ) use ($search): void {
+                                        $farmerQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'state',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'lga',
+                                                'like',
+                                                $search
+                                            );
+                                    }
                                 );
                         }
                     );
                 }
             )
+
+            /*
+             * Catalog filters.
+             */
             ->when(
-                $request->filled('category_id'),
+                $request->filled(
+                    'category_id'
+                ),
                 function (
                     Builder $query
                 ) use ($request): void {
                     $query->whereHas(
                         'produce',
-                        fn (Builder $q) =>
-                            $q->where(
+                        fn (Builder $produceQuery) =>
+                            $produceQuery->where(
                                 'category_id',
                                 $request->validated(
                                     'category_id'
@@ -104,18 +186,200 @@ class ListingController extends Controller
                 }
             )
             ->when(
-                $request->filled('farmer_id'),
-                function (
-                    Builder $query
-                ) use ($request): void {
+                $request->filled(
+                    'farmer_id'
+                ),
+                fn (Builder $query) =>
                     $query->where(
-                        'farmer_id',
+                        'listings.farmer_id',
                         $request->validated(
                             'farmer_id'
                         )
+                    )
+            )
+
+            /*
+             * Farmer location filters.
+             */
+            ->when(
+                $request->filled('state'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'farmer',
+                        fn (Builder $farmerQuery) =>
+                            $farmerQuery->where(
+                                'state',
+                                $request->validated(
+                                    'state'
+                                )
+                            )
                     );
                 }
             )
+            ->when(
+                $request->filled('lga'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'farmer',
+                        fn (Builder $farmerQuery) =>
+                            $farmerQuery->where(
+                                'lga',
+                                $request->validated(
+                                    'lga'
+                                )
+                            )
+                    );
+                }
+            )
+
+            /*
+             * Listing label.
+             */
+            ->when(
+                $request->filled('label'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.label',
+                        $request->validated(
+                            'label'
+                        )
+                    )
+            )
+
+            /*
+             * Availability projection.
+             *
+             * available:
+             *   date-ready + enough stock for the
+             *   minimum order.
+             *
+             * upcoming:
+             *   future availability date.
+             *
+             * out_of_stock:
+             *   date-ready but stock is below the
+             *   minimum quantity required to order.
+             */
+            ->when(
+                $request->filled(
+                    'availability'
+                ),
+                function (
+                    Builder $query
+                ) use (
+                    $request,
+                    $today
+                ): void {
+                    $availability =
+                        $request->validated(
+                            'availability'
+                        );
+
+                    if (
+                        $availability
+                        === 'available'
+                    ) {
+                        $query
+                            ->where(
+                                function (
+                                    Builder $dateQuery
+                                ) use ($today): void {
+                                    $dateQuery
+                                        ->whereNull(
+                                            'listings.available_from'
+                                        )
+                                        ->orWhereDate(
+                                            'listings.available_from',
+                                            '<=',
+                                            $today
+                                        );
+                                }
+                            )
+                            ->whereColumn(
+                                'listings.stock',
+                                '>=',
+                                'listings.minimum_order_quantity'
+                            );
+
+                        return;
+                    }
+
+                    if (
+                        $availability
+                        === 'upcoming'
+                    ) {
+                        $query->whereDate(
+                            'listings.available_from',
+                            '>',
+                            $today
+                        );
+
+                        return;
+                    }
+
+                    if (
+                        $availability
+                        === 'out_of_stock'
+                    ) {
+                        $query
+                            ->where(
+                                function (
+                                    Builder $dateQuery
+                                ) use ($today): void {
+                                    $dateQuery
+                                        ->whereNull(
+                                            'listings.available_from'
+                                        )
+                                        ->orWhereDate(
+                                            'listings.available_from',
+                                            '<=',
+                                            $today
+                                        );
+                                }
+                            )
+                            ->whereColumn(
+                                'listings.stock',
+                                '<',
+                                'listings.minimum_order_quantity'
+                            );
+                    }
+                }
+            )
+
+            /*
+             * Selling-price range.
+             */
+            ->when(
+                $request->filled(
+                    'min_price'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.price',
+                        '>=',
+                        $request->validated(
+                            'min_price'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'max_price'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.price',
+                        '<=',
+                        $request->validated(
+                            'max_price'
+                        )
+                    )
+            )
+
             ->tap(
                 fn (Builder $query) =>
                     $this->applySort(
@@ -124,7 +388,9 @@ class ListingController extends Controller
                         $order
                     )
             )
-            ->paginate($perPage)
+            ->paginate(
+                $perPage
+            )
             ->withQueryString();
 
         return ListingResource::collection(
@@ -135,9 +401,22 @@ class ListingController extends Controller
     public function show(
         Listing $listing
     ): JsonResponse {
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        /*
+         * Public detail follows the same visibility
+         * contract as the marketplace list.
+         */
         if (
-            $listing->status
-            !== ListingStatus::Active
+            $listing->publication_status
+                !== ListingPublicationStatus::Live
+            || $listing->status
+                !== ListingStatus::Active
+            || $listing->farmer->status
+                !== FarmerStatus::Active
         ) {
             return response()->json([
                 'message' =>
@@ -145,14 +424,11 @@ class ListingController extends Controller
             ], 404);
         }
 
-        $listing->load([
-            'produce.category',
-            'farmer',
-        ]);
-
         return response()->json([
             'data' =>
-                new ListingResource($listing),
+                new ListingResource(
+                    $listing
+                ),
         ]);
     }
 
@@ -162,20 +438,21 @@ class ListingController extends Controller
         string $order
     ): void {
         $direction =
-            strtolower($order) === 'asc'
+            strtolower($order)
+                === 'asc'
                 ? 'asc'
                 : 'desc';
 
         match ($sort) {
             'price' =>
                 $query->orderBy(
-                    'price',
+                    'listings.price',
                     $direction
                 ),
 
             'stock' =>
                 $query->orderBy(
-                    'stock',
+                    'listings.stock',
                     $direction
                 ),
 
@@ -235,7 +512,7 @@ class ListingController extends Controller
 
             default =>
                 $query->orderBy(
-                    'created_at',
+                    'listings.created_at',
                     $direction
                 ),
         };
