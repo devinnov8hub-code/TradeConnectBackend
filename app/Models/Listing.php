@@ -36,15 +36,49 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 ])]
 class Listing extends Model
 {
+    /*
+     * Listing images are part of the standard listing
+     * representation. Eager loading here prevents an
+     * N+1 problem across marketplace/admin pages.
+     */
+    protected $with = [
+        'images',
+    ];
+
     protected static function booted(): void
     {
         static::saving(
-            function (Listing $listing): void {
+            function (
+                Listing $listing
+            ): void {
                 $listing
                     ->synchronisePublicationState();
 
                 $listing
                     ->synchroniseDiscount();
+            }
+        );
+
+        /*
+         * Database cascading removes image rows, but
+         * the actual files live outside the database.
+         *
+         * Delete child models explicitly so their
+         * filesystem cleanup event runs.
+         */
+        static::deleting(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->images()
+                    ->get()
+                    ->each(
+                        fn (
+                            ListingImage $image
+                        ) =>
+                            $image->delete()
+                    );
             }
         );
     }
@@ -95,6 +129,18 @@ class Listing extends Model
         );
     }
 
+    public function images(): HasMany
+    {
+        return $this
+            ->hasMany(
+                ListingImage::class
+            )
+            ->orderBy(
+                'position'
+            )
+            ->orderBy('id');
+    }
+
     public function farmer(): BelongsTo
     {
         return $this->belongsTo(
@@ -127,9 +173,12 @@ class Listing extends Model
 
         if (
             $this->available_from !== null
-            && $this->available_from->gt(
-                now()->startOfDay()
-            )
+            && $this
+                ->available_from
+                ->gt(
+                    now()
+                        ->startOfDay()
+                )
         ) {
             return false;
         }
@@ -141,13 +190,6 @@ class Listing extends Model
 
     private function synchronisePublicationState(): void
     {
-        /*
-         * publication_status is now the preferred
-         * Figma-facing state.
-         *
-         * status remains synchronized so older API
-         * consumers continue working.
-         */
         if (! $this->exists) {
             $attributes =
                 $this->getAttributes();
@@ -176,11 +218,6 @@ class Listing extends Model
                 $this
                     ->synchronisePublicationFromLegacyStatus();
             } else {
-                /*
-                 * Brand-new listings default to pending
-                 * when neither API contract explicitly
-                 * supplies a state.
-                 */
                 $this->publication_status =
                     ListingPublicationStatus::Pending;
 
@@ -192,19 +229,13 @@ class Listing extends Model
                 'publication_status'
             )
         ) {
-            /*
-             * New API contract wins if both fields
-             * are supplied during an update.
-             */
             $this
                 ->synchroniseLegacyStatusFromPublication();
         } elseif (
-            $this->isDirty('status')
+            $this->isDirty(
+                'status'
+            )
         ) {
-            /*
-             * Legacy clients that still update status
-             * continue to affect publication correctly.
-             */
             $this
                 ->synchronisePublicationFromLegacyStatus();
         }
@@ -212,9 +243,11 @@ class Listing extends Model
         if (
             $this->publication_status
                 === ListingPublicationStatus::Live
-            && $this->published_at === null
+            && $this->published_at
+                === null
         ) {
-            $this->published_at = now();
+            $this->published_at =
+                now();
         }
     }
 
@@ -248,7 +281,8 @@ class Listing extends Model
         }
 
         $originalPrice =
-            (float) $this->original_price;
+            (float) $this
+                ->original_price;
 
         $currentPrice =
             (float) $this->price;
@@ -263,8 +297,13 @@ class Listing extends Model
         }
 
         $discount =
-            (($originalPrice - $currentPrice)
-                / $originalPrice)
+            (
+                (
+                    $originalPrice
+                    - $currentPrice
+                )
+                / $originalPrice
+            )
             * 100;
 
         $this->discount_percent =

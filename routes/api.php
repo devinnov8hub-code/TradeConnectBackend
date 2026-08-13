@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\V1\OrderController;
 use App\Http\Controllers\Api\V1\PaymentController;
 use App\Http\Middleware\EnsureUserIsActive;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\V1\Admin\ListingImageController as AdminListingImageController;
 
 Route::prefix('v1')->group(function () {
     Route::get('/health', function () {
@@ -165,6 +166,12 @@ Route::prefix('v1')->group(function () {
                     'all',
                 ]
             );
+
+            Route::post('listings/{listing}/images', [AdminListingImageController::class, 'store']);
+
+            Route::patch('listings/{listing}/images/reorder', [AdminListingImageController::class, 'reorder']);
+
+            Route::delete('listings/{listing}/images/{listingImage}', [AdminListingImageController::class, 'destroy']);
 
             Route::get(
                 'listings/{listing}',

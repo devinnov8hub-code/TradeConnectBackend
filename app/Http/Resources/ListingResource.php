@@ -14,20 +14,39 @@ class ListingResource extends JsonResource
             '0.00';
 
         if (
-            $this->original_price !== null
+            $this->original_price
+            !== null
             && bccomp(
-                (string) $this->original_price,
-                (string) $this->price,
+                (string)
+                    $this->original_price,
+                (string)
+                    $this->price,
                 2
             ) === 1
         ) {
             $discountAmount =
                 bcsub(
-                    (string) $this->original_price,
-                    (string) $this->price,
+                    (string)
+                        $this->original_price,
+                    (string)
+                        $this->price,
                     2
                 );
         }
+
+        /*
+         * Ordered listing-specific imagery takes
+         * priority over the legacy global produce
+         * image.
+         */
+        $primaryImageUrl =
+            $this
+                ->images
+                ->first()
+                ?->url
+            ?? $this
+                ->produce
+                ->image_url;
 
         return [
             'id' =>
@@ -39,9 +58,6 @@ class ListingResource extends JsonResource
             'produce_id' =>
                 $this->produce_id,
 
-            /*
-             * Commercial information.
-             */
             'price' =>
                 $this->price,
 
@@ -63,9 +79,6 @@ class ListingResource extends JsonResource
             'minimum_order_quantity' =>
                 $this->minimum_order_quantity,
 
-            /*
-             * Marketplace presentation.
-             */
             'description' =>
                 $this->description,
 
@@ -76,19 +89,17 @@ class ListingResource extends JsonResource
                 $this->grade,
 
             'available_from' =>
-                $this->available_from
+                $this
+                    ->available_from
                     ?->toDateString(),
 
             'is_available' =>
                 $this->isAvailable(),
 
-            /*
-             * Legacy state remains temporarily while
-             * publication_status becomes the preferred
-             * frontend field.
-             */
             'status' =>
-                $this->status->value,
+                $this
+                    ->status
+                    ->value,
 
             'publication_status' =>
                 $this
@@ -98,22 +109,35 @@ class ListingResource extends JsonResource
             'published_at' =>
                 $this->published_at,
 
+            /*
+             * Preferred new marketplace imagery.
+             */
+            'primary_image_url' =>
+                $primaryImageUrl,
+
+            'images' =>
+                ListingImageResource::collection(
+                    $this->images
+                ),
+
             'produce' => [
                 'id' =>
-                    $this->produce->id,
+                    $this
+                        ->produce
+                        ->id,
 
                 'name' =>
-                    $this->produce->name,
+                    $this
+                        ->produce
+                        ->name,
 
                 /*
-                 * This remains the existing global
-                 * produce image for now.
-                 *
-                 * Listing-specific image storage will
-                 * be the separate media sub-slice.
+                 * Legacy catalog image remains available
+                 * during frontend migration.
                  */
                 'image_url' =>
-                    $this->produce
+                    $this
+                        ->produce
                         ->image_url,
 
                 'category' => [
@@ -133,16 +157,24 @@ class ListingResource extends JsonResource
 
             'farmer' => [
                 'id' =>
-                    $this->farmer->id,
+                    $this
+                        ->farmer
+                        ->id,
 
                 'name' =>
-                    $this->farmer->name,
+                    $this
+                        ->farmer
+                        ->name,
 
                 'state' =>
-                    $this->farmer->state,
+                    $this
+                        ->farmer
+                        ->state,
 
                 'lga' =>
-                    $this->farmer->lga,
+                    $this
+                        ->farmer
+                        ->lga,
             ],
 
             'created_at' =>
