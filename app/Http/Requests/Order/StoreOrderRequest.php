@@ -3,10 +3,12 @@
 namespace App\Http\Requests\Order;
 
 use App\Enums\DeliveryMethod;
+use App\Enums\ListingPublicationStatus;
 use App\Enums\ListingStatus;
 use App\Http\Requests\ApiFormRequest;
 use App\Models\Listing;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 class StoreOrderRequest extends ApiFormRequest
 {
@@ -43,7 +45,9 @@ class StoreOrderRequest extends ApiFormRequest
              */
             'delivery_method' => [
                 'required',
-                Rule::enum(DeliveryMethod::class),
+                Rule::enum(
+                    DeliveryMethod::class
+                ),
             ],
 
             'delivery_name' => [
@@ -85,17 +89,45 @@ class StoreOrderRequest extends ApiFormRequest
             /*
              * Server-owned order values.
              */
-            'listing_id' => ['prohibited'],
-            'quantity' => ['prohibited'],
-            'subtotal' => ['prohibited'],
-            'delivery_fee' => ['prohibited'],
-            'total' => ['prohibited'],
-            'status' => ['prohibited'],
-            'payment_status' => ['prohibited'],
+            'listing_id' => [
+                'prohibited',
+            ],
 
-            'items.*.unit_price' => ['prohibited'],
-            'items.*.discount_amount' => ['prohibited'],
-            'items.*.line_total' => ['prohibited'],
+            'quantity' => [
+                'prohibited',
+            ],
+
+            'subtotal' => [
+                'prohibited',
+            ],
+
+            'delivery_fee' => [
+                'prohibited',
+            ],
+
+            'total' => [
+                'prohibited',
+            ],
+
+            'status' => [
+                'prohibited',
+            ],
+
+            'payment_status' => [
+                'prohibited',
+            ],
+
+            'items.*.unit_price' => [
+                'prohibited',
+            ],
+
+            'items.*.discount_amount' => [
+                'prohibited',
+            ],
+
+            'items.*.line_total' => [
+                'prohibited',
+            ],
         ];
     }
 
@@ -182,66 +214,176 @@ class StoreOrderRequest extends ApiFormRequest
         ];
     }
 
-    public function withValidator($validator): void
-    {
-        $validator->after(function ($validator): void {
-            if ($validator->errors()->isNotEmpty()) {
-                return;
-            }
+    public function withValidator(
+        Validator $validator
+    ): void {
+        $validator->after(
+            function (
+                Validator $validator
+            ): void {
+                /*
+                 * Do not perform database-dependent
+                 * validation if the item structure itself
+                 * is already invalid.
+                 */
+                if (
+                    $validator
+                        ->errors()
+                        ->has('items')
+                ) {
+                    return;
+                }
 
-            $items = collect(
-                $this->input('items', [])
-            );
-
-            $listingIds = $items
-                ->pluck('listing_id')
-                ->map(
-                    fn ($id) => (int) $id
-                )
-                ->unique()
-                ->values();
-
-            $listings = Listing::query()
-                ->whereIn(
-                    'id',
-                    $listingIds
-                )
-                ->get()
-                ->keyBy('id');
-
-            foreach ($items as $index => $item) {
-                $listing = $listings->get(
-                    (int) $item['listing_id']
+                $items = collect(
+                    $this->input(
+                        'items',
+                        []
+                    )
                 );
 
-                if (! $listing) {
-                    continue;
+                /*
+                 * Individual wildcard validation errors
+                 * can leave an item incomplete.
+                 */
+                if (
+                    $items->contains(
+                        fn ($item) =>
+                            ! is_array($item)
+                            || ! isset(
+                                $item[
+                                    'listing_id'
+                                ]
+                            )
+                            || ! isset(
+                                $item[
+                                    'quantity'
+                                ]
+                            )
+                    )
+                ) {
+                    return;
                 }
 
-                if (
-                    $listing->status
-                    !== ListingStatus::Active
-                ) {
-                    $validator
-                        ->errors()
-                        ->add(
-                            "items.{$index}.listing_id",
-                            'This listing is not available.'
-                        );
-                }
+                $listingIds = $items
+                    ->pluck(
+                        'listing_id'
+                    )
+                    ->map(
+                        fn ($id) =>
+                            (int) $id
+                    )
+                    ->unique()
+                    ->values();
 
-                if (
-                    $listing->stock
-                    < (int) $item['quantity']
+                $listings = Listing::query()
+                    ->whereIn(
+                        'id',
+                        $listingIds
+                    )
+                    ->get()
+                    ->keyBy('id');
+
+                foreach (
+                    $items
+                    as $index => $item
                 ) {
-                    $validator
-                        ->errors()
-                        ->add(
-                            "items.{$index}.quantity",
-                            'Insufficient stock for this listing.'
+                    $listing =
+                        $listings->get(
+                            (int) $item[
+                                'listing_id'
+                            ]
                         );
+
+                    if (! $listing) {
+                        continue;
+                    }
+
+                    $quantity =
+                        (int) $item[
+                            'quantity'
+                        ];
+
+                    /*
+                     * Both states are checked while the
+                     * legacy status field remains in the
+                     * application.
+                     */
+                    if (
+                        $listing
+                            ->publication_status
+                        !== ListingPublicationStatus::Live
+                        || $listing->status
+                        !== ListingStatus::Active
+                    ) {
+                        $validator
+                            ->errors()
+                            ->add(
+                                "items.{$index}.listing_id",
+                                'This listing is not available.'
+                            );
+
+                        continue;
+                    }
+
+                    /*
+                     * A live listing may be visible before
+                     * its harvest/availability date, but it
+                     * cannot be ordered yet.
+                     */
+                    if (
+                        $listing->available_from
+                        !== null
+                        && $listing
+                            ->available_from
+                            ->gt(
+                                now()
+                                    ->startOfDay()
+                            )
+                    ) {
+                        $validator
+                            ->errors()
+                            ->add(
+                                "items.{$index}.listing_id",
+                                'This listing is not available for ordering yet.'
+                            );
+
+                        continue;
+                    }
+
+                    $minimumQuantity =
+                        max(
+                            1,
+                            (int) ceil(
+                                (float) $listing
+                                    ->minimum_order_quantity
+                            )
+                        );
+
+                    if (
+                        $quantity
+                        < $minimumQuantity
+                    ) {
+                        $validator
+                            ->errors()
+                            ->add(
+                                "items.{$index}.quantity",
+                                "Minimum order quantity for this listing is {$minimumQuantity}."
+                            );
+                    }
+
+                    if (
+                        $listing->stock
+                        < $quantity
+                    ) {
+                        $validator
+                            ->errors()
+                            ->add(
+                                "items.{$index}.quantity",
+                                'Insufficient stock for this listing.'
+                            );
+                    }
                 }
             }
-        });
+        );
     }
 }
