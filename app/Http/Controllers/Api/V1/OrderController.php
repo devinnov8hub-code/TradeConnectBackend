@@ -451,12 +451,14 @@ class OrderController extends Controller
         }
 
         $order->load([
+            'statusEvents.changedBy',
             'items.produce.category',
             'items.farmer',
 
             // Legacy compatibility.
             'listing.produce.category',
             'listing.farmer',
+
         ]);
 
         return response()->json([

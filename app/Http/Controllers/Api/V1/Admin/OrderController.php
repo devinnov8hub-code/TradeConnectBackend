@@ -352,24 +352,26 @@ class OrderController extends Controller
     }
 
     public function show(
-        Order $order
-    ): JsonResponse {
-        $order->load([
-            'user',
+    Order $order
+): JsonResponse {
+    $order->load([
+        'user',
 
-            'items.produce.category',
-            'items.farmer',
+        'statusEvents.changedBy',
 
-            // Legacy compatibility.
-            'listing.produce.category',
-            'listing.farmer',
-        ]);
+        'items.produce.category',
+        'items.farmer',
 
-        return response()->json([
-            'data' =>
-                new OrderResource($order),
-        ]);
-    }
+        // Legacy compatibility.
+        'listing.produce.category',
+        'listing.farmer',
+    ]);
+
+    return response()->json([
+        'data' =>
+            new OrderResource($order),
+    ]);
+}
 
     public function update(
         UpdateOrderStatusRequest $request,

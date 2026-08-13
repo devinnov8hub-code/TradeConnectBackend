@@ -1,0 +1,1254 @@
+=== app/Models/Order.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+#[Fillable([
+    'user_id',
+
+    // Legacy single-item fields.
+    'listing_id',
+    'quantity',
+
+    'order_number',
+    'subtotal',
+    'delivery_fee',
+    'total',
+
+    'status',
+
+    'payment_status',
+    'payment_provider',
+    'payment_reference',
+    'payment_access_code',
+    'payment_authorization_url',
+
+    'delivery_method',
+    'delivery_name',
+    'delivery_phone',
+    'delivery_state',
+    'delivery_lga',
+    'delivery_address',
+    'delivery_notes',
+
+    'placed_at',
+    'confirmed_at',
+    'processing_at',
+    'out_for_delivery_at',
+    'deliver_by',
+    'delivered_at',
+    'cancelled_at',
+
+    'paid_at',
+    'payment_failed_at',
+    'refunded_at',
+])]
+class Order extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'subtotal' => 'decimal:2',
+            'delivery_fee' => 'decimal:2',
+            'total' => 'decimal:2',
+
+            'status' =>
+                OrderStatus::class,
+
+            'payment_status' =>
+                PaymentStatus::class,
+
+            'placed_at' => 'datetime',
+            'confirmed_at' => 'datetime',
+            'processing_at' => 'datetime',
+            'out_for_delivery_at' => 'datetime',
+            'deliver_by' => 'datetime',
+            'delivered_at' => 'datetime',
+            'cancelled_at' => 'datetime',
+
+            'paid_at' => 'datetime',
+            'payment_failed_at' => 'datetime',
+            'refunded_at' => 'datetime',
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(
+            User::class
+        );
+    }
+
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(
+            Listing::class
+        );
+    }
+
+    public function items(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    public function dispute(): HasOne
+    {
+        return $this->hasOne(
+            Dispute::class
+        );
+    }
+
+    public function isCancellable(): bool
+    {
+        /*
+         * Until refund support exists, a paid
+         * order must not be cancelled directly.
+         */
+        return $this->status
+                === OrderStatus::New
+            && $this->payment_status
+                !== PaymentStatus::Paid;
+    }
+}
+
+=== app/Http/Controllers/Api/V1/Admin/OrderController.php ===
+<?php
+
+namespace App\Http\Controllers\Api\V1\Admin;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerOrderRequest;
+use App\Http\Requests\Admin\IndexOrderRequest;
+use App\Http\Requests\Admin\UpdateOrderStatusRequest;
+use App\Http\Resources\OrderResource;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Order;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
+
+class OrderController extends Controller
+{
+    
+    public function index(
+        IndexOrderRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $orders = Order::query()
+            ->with([
+                'user',
+
+                'items.produce.category',
+                'items.farmer',
+
+                // Legacy compatibility.
+                'listing.produce.category',
+                'listing.farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'orders.order_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'user',
+                                    function (
+                                        Builder $userQuery
+                                    ) use ($search): void {
+                                        $userQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'email',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'items',
+                                    function (
+                                        Builder $itemQuery
+                                    ) use ($search): void {
+                                        $itemQuery->where(
+                                            function (
+                                                Builder $query
+                                            ) use ($search): void {
+                                                $query
+                                                    ->where(
+                                                        'produce_name',
+                                                        'like',
+                                                        $search
+                                                    )
+                                                    ->orWhere(
+                                                        'category_name',
+                                                        'like',
+                                                        $search
+                                                    );
+                                            }
+                                        );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'items.farmer',
+                                    function (
+                                        Builder $farmerQuery
+                                    ) use ($search): void {
+                                        $farmerQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'farmer_code',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'payment_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.payment_status',
+                        $request->validated(
+                            'payment_status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled('farmer_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'items',
+                        fn (Builder $itemQuery) =>
+                            $itemQuery->where(
+                                'farmer_id',
+                                $request->validated(
+                                    'farmer_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->orderBy(
+                'orders.'.$sort,
+                strtolower($order) === 'asc'
+                    ? 'asc'
+                    : 'desc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return OrderResource::collection(
+            $orders
+        )->response();
+    }
+
+    public function farmerIndex(
+        IndexFarmerOrderRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        /*
+         * A parent order belongs in this farmer's order
+         * history when at least one order item belongs
+         * to the farmer.
+         *
+         * We deliberately do not rely on orders.listing_id
+         * because one parent order can contain items from
+         * multiple farmers.
+         */
+        $orders = Order::query()
+            ->whereHas(
+                'items',
+                fn (Builder $query) =>
+                    $query->where(
+                        'farmer_id',
+                        $farmer->id
+                    )
+            )
+            ->with([
+                'user',
+
+                'items.produce.category',
+                'items.farmer',
+
+                // Legacy compatibility.
+                'listing.produce.category',
+                'listing.farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use (
+                    $request,
+                    $farmer
+                ): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use (
+                            $search,
+                            $farmer
+                        ): void {
+                            $query
+                                ->where(
+                                    'orders.order_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'user',
+                                    function (
+                                        Builder $userQuery
+                                    ) use ($search): void {
+                                        $userQuery
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'email',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'items',
+                                    function (
+                                        Builder $itemQuery
+                                    ) use (
+                                        $farmer,
+                                        $search
+                                    ): void {
+                                        $itemQuery
+                                            ->where(
+                                                'farmer_id',
+                                                $farmer->id
+                                            )
+                                            ->where(
+                                                function (
+                                                    Builder $query
+                                                ) use ($search): void {
+                                                    $query
+                                                        ->where(
+                                                            'produce_name',
+                                                            'like',
+                                                            $search
+                                                        )
+                                                        ->orWhere(
+                                                            'category_name',
+                                                            'like',
+                                                            $search
+                                                        );
+                                                }
+                                            );
+                                    }
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'payment_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.payment_status',
+                        $request->validated(
+                            'payment_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                'orders.'.$sort,
+                strtolower($order) === 'asc'
+                    ? 'asc'
+                    : 'desc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return OrderResource::collection(
+            $orders
+        )->response();
+    }
+
+    public function show(
+        Order $order
+    ): JsonResponse {
+        $order->load([
+            'user',
+
+            'items.produce.category',
+            'items.farmer',
+
+            // Legacy compatibility.
+            'listing.produce.category',
+            'listing.farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new OrderResource($order),
+        ]);
+    }
+
+    public function update(
+        UpdateOrderStatusRequest $request,
+        Order $order
+    ): JsonResponse {
+        /*
+         * Completed orders cannot be changed.
+         */
+        if (
+            in_array(
+                $order->status,
+                [
+                    OrderStatus::Delivered,
+                    OrderStatus::Cancelled,
+                ],
+                true
+            )
+        ) {
+            return response()->json([
+                'message' =>
+                    'This order can no longer be updated.',
+            ], 422);
+        }
+
+        $newStatus = $request->enum(
+            'status',
+            OrderStatus::class
+        );
+
+        /*
+         * A paid order cannot simply be cancelled.
+         *
+         * Once we implement refunds, cancellation of a paid
+         * order will need to go through the refund workflow.
+         */
+        if (
+            $newStatus === OrderStatus::Cancelled
+            && $order->payment_status
+                === PaymentStatus::Paid
+        ) {
+            return response()->json([
+                'message' =>
+                    'Paid orders cannot be cancelled until a refund has been processed.',
+            ], 422);
+        }
+
+        $order = DB::transaction(
+            function () use (
+                $order,
+                $newStatus
+            ): Order {
+                $lockedOrder = Order::query()
+                    ->whereKey($order->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                if (
+                    $newStatus === OrderStatus::Cancelled
+                    && $lockedOrder->payment_status
+                        === PaymentStatus::Paid
+                ) {
+                    throw ValidationException::withMessages([
+                        'order' => [
+                            'Paid orders cannot be cancelled until a refund has been processed.',
+                        ],
+                    ]);
+                }
+
+                if (
+                    in_array(
+                        $lockedOrder->status,
+                        [
+                            OrderStatus::Delivered,
+                            OrderStatus::Cancelled,
+                        ],
+                        true
+                    )
+                ) {
+                    throw ValidationException::withMessages([
+                        'order' => [
+                            'This order can no longer be updated.',
+                        ],
+                    ]);
+                }
+
+                $previousStatus =
+                    $lockedOrder->status;
+
+                $updates = [
+                    'status' => $newStatus,
+                ];
+
+                if (
+                    $newStatus
+                    === OrderStatus::InTransit
+                ) {
+                    $updates['out_for_delivery_at'] =
+                        $lockedOrder->out_for_delivery_at
+                        ?? now();
+                }
+
+                if (
+                    $newStatus
+                    === OrderStatus::Delivered
+                ) {
+                    $updates['delivered_at'] =
+                        $lockedOrder->delivered_at
+                        ?? now();
+                }
+
+                if (
+                    $newStatus
+                    === OrderStatus::Cancelled
+                ) {
+                    $updates['cancelled_at'] =
+                        $lockedOrder->cancelled_at
+                        ?? now();
+
+                    if (
+                        $previousStatus
+                        !== OrderStatus::Cancelled
+                    ) {
+                        $this->restoreOrderStock(
+                            $lockedOrder
+                        );
+                    }
+                }
+
+                $lockedOrder->update(
+                    $updates
+                );
+
+                return $lockedOrder->fresh([
+                    'user',
+
+                    'items.produce.category',
+                    'items.farmer',
+
+                    // Legacy compatibility.
+                    'listing.produce.category',
+                    'listing.farmer',
+                ]);
+            }
+        );
+
+        return response()->json([
+            'data' =>
+                new OrderResource($order),
+        ]);
+    }
+
+    private function restoreOrderStock(
+        Order $order
+    ): void {
+        $order->loadMissing('items');
+
+        /*
+         * New multi-item orders.
+         */
+        if ($order->items->isNotEmpty()) {
+            $listingIds = $order->items
+                ->pluck('listing_id')
+                ->filter()
+                ->map(
+                    fn ($id) => (int) $id
+                )
+                ->unique()
+                ->sort()
+                ->values();
+
+            $listings = Listing::query()
+                ->whereIn(
+                    'id',
+                    $listingIds
+                )
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get()
+                ->keyBy('id');
+
+            foreach ($order->items as $item) {
+                if (! $item->listing_id) {
+                    continue;
+                }
+
+                $listings
+                    ->get($item->listing_id)
+                    ?->increment(
+                        'stock',
+                        $item->quantity
+                    );
+            }
+
+            return;
+        }
+
+        /*
+         * Legacy order support.
+         */
+        if (
+            $order->listing_id
+            && $order->quantity
+        ) {
+            Listing::query()
+                ->whereKey(
+                    $order->listing_id
+                )
+                ->lockForUpdate()
+                ->first()
+                ?->increment(
+                    'stock',
+                    $order->quantity
+                );
+        }
+    }
+}
+
+=== app/Http/Resources/OrderResource.php ===
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class OrderResource extends JsonResource
+{
+    public function toArray(Request $request): array
+    {
+        /*
+         * These legacy relationships remain temporarily because
+         * some older parts of the API still expect a single listing
+         * attached directly to an order.
+         */
+        $legacyListing = $this->relationLoaded('listing')
+            ? $this->listing
+            : null;
+
+        $legacyProduce = $legacyListing?->relationLoaded('produce')
+            ? $legacyListing->produce
+            : null;
+
+        $legacyFarmer = $legacyListing?->relationLoaded('farmer')
+            ? $legacyListing->farmer
+            : null;
+
+        return [
+            'id' => $this->id,
+
+            'order_number' => $this->order_number
+                ?? 'ORD-'.str_pad(
+                    (string) $this->id,
+                    6,
+                    '0',
+                    STR_PAD_LEFT
+                ),
+
+            'user_id' => $this->user_id,
+
+            /*
+             * Temporary compatibility fields.
+             *
+             * For new multi-item orders these correspond to the
+             * first item only. New frontend code should use items[].
+             */
+            'listing_id' => $this->listing_id,
+            'quantity' => $this->quantity,
+
+            'subtotal' => $this->subtotal ?? $this->total,
+            'delivery_fee' => $this->delivery_fee ?? '0.00',
+            'total' => $this->total,
+
+            'status' => $this->status->value,
+            'payment_status' => $this->payment_status ?? 'pending',
+
+            'delivery' => [
+                'method' => $this->delivery_method,
+                'name' => $this->delivery_name,
+                'phone' => $this->delivery_phone,
+                'state' => $this->delivery_state,
+                'lga' => $this->delivery_lga,
+                'address' => $this->delivery_address,
+                'notes' => $this->delivery_notes,
+            ],
+
+            'items' => OrderItemResource::collection(
+                $this->whenLoaded('items')
+            ),
+
+            'buyer_name' => $this->when(
+                $this->relationLoaded('user') && $this->user,
+                fn () => $this->user->name,
+            ),
+
+            'buyer' => $this->when(
+                $this->relationLoaded('user') && $this->user,
+                fn () => [
+                    'id' => $this->user->id,
+                    'name' => $this->user->name,
+                    'email' => $this->user->email,
+                ],
+            ),
+
+            /*
+             * Legacy single-item representation.
+             *
+             * Kept temporarily so older API consumers do not
+             * immediately break.
+             */
+            'produce' => $this->when(
+                $legacyProduce !== null,
+                fn () => [
+                    'id' => $legacyProduce->id,
+                    'name' => $legacyProduce->name,
+                    'image_url' => $legacyProduce->image_url,
+
+                    'category' => [
+                        'id' => $legacyProduce->category?->id,
+                        'name' => $legacyProduce->category?->name,
+                    ],
+                ],
+            ),
+
+            'farmer' => $this->when(
+                $legacyFarmer !== null,
+                fn () => [
+                    'id' => $legacyFarmer->id,
+                    'name' => $legacyFarmer->name,
+                    'state' => $legacyFarmer->state,
+                    'lga' => $legacyFarmer->lga,
+                    'phone_number' => $legacyFarmer->phone_number,
+                ],
+            ),
+
+            'placed_at' => $this->placed_at,
+            'confirmed_at' => $this->confirmed_at,
+            'processing_at' => $this->processing_at,
+            'out_for_delivery_at' => $this->out_for_delivery_at,
+            'deliver_by' => $this->deliver_by,
+            'delivered_at' => $this->delivered_at,
+            'cancelled_at' => $this->cancelled_at,
+
+            'created_at' => $this->created_at,
+            'updated_at' => $this->updated_at,
+        ];
+    }
+}
+
+=== app/Enums/OrderStatus.php ===
+<?php
+
+namespace App\Enums;
+
+enum OrderStatus: string
+{
+    case New = 'new';
+    case InTransit = 'in_transit';
+    case Cancelled = 'cancelled';
+    case Delivered = 'delivered';
+}
+
+=== app/Http/Requests/Admin/UpdateOrderStatusRequest.php ===
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\OrderStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateOrderStatusRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'status' => [
+                'required',
+                Rule::enum(OrderStatus::class),
+                Rule::notIn([OrderStatus::New->value]),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.required' => 'Status is required.',
+            'status.enum' => 'Status must be in_transit, cancelled, or delivered.',
+            'status.not_in' => 'Use the default new status when creating an order.',
+        ];
+    }
+}
+
+=== database/migrations/2026_06_10_150000_create_orders_table.php ===
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('orders', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('listing_id')->constrained()->cascadeOnDelete();
+            $table->unsignedInteger('quantity');
+            $table->decimal('total', 12, 2);
+            $table->string('status')->default('new');
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('orders');
+    }
+};
+
+=== database/migrations/2026_08_11_141246_add_order_architecture.php ===
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->string('order_number')
+                ->nullable()
+                ->unique()
+                ->after('id');
+
+            $table->decimal('subtotal', 12, 2)
+                ->nullable()
+                ->after('quantity');
+
+            $table->decimal('delivery_fee', 12, 2)
+                ->default(0)
+                ->after('subtotal');
+
+            $table->string('payment_status')
+                ->default('pending')
+                ->after('status');
+
+            $table->string('delivery_method')
+                ->nullable()
+                ->after('payment_status');
+
+            $table->string('delivery_name')
+                ->nullable()
+                ->after('delivery_method');
+
+            $table->string('delivery_phone')
+                ->nullable()
+                ->after('delivery_name');
+
+            $table->string('delivery_state')
+                ->nullable()
+                ->after('delivery_phone');
+
+            $table->string('delivery_lga')
+                ->nullable()
+                ->after('delivery_state');
+
+            $table->text('delivery_address')
+                ->nullable()
+                ->after('delivery_lga');
+
+            $table->text('delivery_notes')
+                ->nullable()
+                ->after('delivery_address');
+
+            $table->timestamp('placed_at')->nullable();
+            $table->timestamp('confirmed_at')->nullable();
+            $table->timestamp('processing_at')->nullable();
+            $table->timestamp('out_for_delivery_at')->nullable();
+            $table->timestamp('deliver_by')->nullable();
+            $table->timestamp('delivered_at')->nullable();
+            $table->timestamp('cancelled_at')->nullable();
+        });
+
+        Schema::create('order_items', function (Blueprint $table) {
+            $table->id();
+
+            $table->foreignId('order_id')
+                ->constrained()
+                ->cascadeOnDelete();
+
+            $table->foreignId('listing_id')
+                ->nullable()
+                ->constrained()
+                ->nullOnDelete();
+
+            $table->foreignId('farmer_id')
+                ->nullable()
+                ->constrained()
+                ->nullOnDelete();
+
+            $table->foreignId('produce_id')
+                ->nullable()
+                ->constrained('produce')
+                ->nullOnDelete();
+
+            /*
+             * Snapshot fields.
+             *
+             * These preserve what the buyer actually purchased even if the
+             * listing, produce, category, farmer, or price changes later.
+             */
+            $table->string('produce_name');
+            $table->string('category_name')->nullable();
+            $table->string('unit')->nullable();
+
+            $table->unsignedInteger('quantity');
+
+            $table->decimal('unit_price', 12, 2);
+
+            $table->decimal('discount_amount', 12, 2)
+                ->default(0);
+
+            $table->decimal('line_total', 12, 2);
+
+            $table->timestamps();
+        });
+
+        /*
+         * Backfill orders that already exist.
+         *
+         * The old system stored one listing directly on each order.
+         * We convert each of those legacy orders into one OrderItem while
+         * leaving listing_id and quantity on orders in place for now.
+         */
+        DB::table('orders')
+            ->orderBy('id')
+            ->chunkById(100, function ($orders): void {
+                foreach ($orders as $order) {
+                    $listing = DB::table('listings')
+                        ->join(
+                            'produce',
+                            'produce.id',
+                            '=',
+                            'listings.produce_id'
+                        )
+                        ->leftJoin(
+                            'categories',
+                            'categories.id',
+                            '=',
+                            'produce.category_id'
+                        )
+                        ->where('listings.id', $order->listing_id)
+                        ->select([
+                            'listings.farmer_id',
+                            'listings.produce_id',
+                            'produce.name as produce_name',
+                            'categories.name as category_name',
+                        ])
+                        ->first();
+
+                    if (! $listing) {
+                        continue;
+                    }
+
+                    $quantity = max((int) $order->quantity, 1);
+
+                    /*
+                     * Derive the historical unit price from the order total,
+                     * rather than trusting today's listing price.
+                     */
+                    $unitPrice = number_format(
+                        ((float) $order->total) / $quantity,
+                        2,
+                        '.',
+                        ''
+                    );
+
+                    DB::table('order_items')->insert([
+                        'order_id' => $order->id,
+                        'listing_id' => $order->listing_id,
+                        'farmer_id' => $listing->farmer_id,
+                        'produce_id' => $listing->produce_id,
+                        'produce_name' => $listing->produce_name,
+                        'category_name' => $listing->category_name,
+                        'unit' => null,
+                        'quantity' => $quantity,
+                        'unit_price' => $unitPrice,
+                        'discount_amount' => 0,
+                        'line_total' => $order->total,
+                        'created_at' => $order->created_at,
+                        'updated_at' => $order->updated_at,
+                    ]);
+
+                    DB::table('orders')
+                        ->where('id', $order->id)
+                        ->update([
+                            'order_number' => 'ORD-'.str_pad(
+                                (string) $order->id,
+                                6,
+                                '0',
+                                STR_PAD_LEFT
+                            ),
+                            'subtotal' => $order->total,
+                            'placed_at' => $order->created_at,
+                        ]);
+                }
+            });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('order_items');
+
+        Schema::table('orders', function (Blueprint $table) {
+            $table->dropUnique('orders_order_number_unique');
+
+            $table->dropColumn([
+                'order_number',
+                'subtotal',
+                'delivery_fee',
+                'payment_status',
+                'delivery_method',
+                'delivery_name',
+                'delivery_phone',
+                'delivery_state',
+                'delivery_lga',
+                'delivery_address',
+                'delivery_notes',
+                'placed_at',
+                'confirmed_at',
+                'processing_at',
+                'out_for_delivery_at',
+                'deliver_by',
+                'delivered_at',
+                'cancelled_at',
+            ]);
+        });
+    }
+};
+
+=== database/migrations/2026_08_11_151125_add_payment_metadata_to_orders_table.php ===
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->string('payment_provider')
+                ->nullable()
+                ->after('payment_status');
+
+            $table->string('payment_reference')
+                ->nullable()
+                ->unique()
+                ->after('payment_provider');
+
+            $table->timestamp('paid_at')
+                ->nullable()
+                ->after('payment_reference');
+
+            $table->timestamp('payment_failed_at')
+                ->nullable()
+                ->after('paid_at');
+
+            $table->timestamp('refunded_at')
+                ->nullable()
+                ->after('payment_failed_at');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->dropUnique(
+                'orders_payment_reference_unique'
+            );
+
+            $table->dropColumn([
+                'payment_provider',
+                'payment_reference',
+                'paid_at',
+                'payment_failed_at',
+                'refunded_at',
+            ]);
+        });
+    }
+};
+
+=== database/migrations/2026_08_11_152738_add_paystack_checkout_fields_to_orders_table.php ===
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->string('payment_access_code')
+                ->nullable()
+                ->after('payment_reference');
+
+            $table->text('payment_authorization_url')
+                ->nullable()
+                ->after('payment_access_code');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('orders', function (Blueprint $table) {
+            $table->dropColumn([
+                'payment_access_code',
+                'payment_authorization_url',
+            ]);
+        });
+    }
+};
+
+=== Order-related models ===
+
+Name          FullName                                                                                 
+----          --------                                                                                 
+Order.php     C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Models\Order.php    
+OrderItem.php C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Models\OrderItem.php
+
+
+
+
+=== Order-related tests ===
+
+Name                     FullName                                                                                      
+----                     --------                                                                                      
+FarmerOrderIndexTest.php C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Farmer...
+OrderIndexTest.php       C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\OrderI...
+OrderIndexTest.php       C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Order\OrderI...
+OrderItemTest.php        C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Order\OrderI...
+OrderTest.php            C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Order\OrderT...
+
+
+
