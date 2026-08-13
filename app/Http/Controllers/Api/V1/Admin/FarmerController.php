@@ -14,9 +14,9 @@ use App\Http\Requests\Admin\StoreFarmerRequest;
 use App\Http\Requests\Admin\UpdateFarmerRequest;
 use App\Http\Requests\Admin\UpdateFarmerStatusRequest;
 use App\Http\Requests\Admin\UpdateFarmerVerificationRequest;
+use App\Http\Resources\FarmerOrderSummaryResource;
 use App\Http\Resources\FarmerResource;
 use App\Http\Resources\ListingResource;
-use App\Http\Resources\OrderResource;
 use App\Models\Farmer;
 use App\Models\Order;
 use App\Models\OrderItem;
@@ -26,6 +26,8 @@ use Illuminate\Support\Facades\DB;
 
 class FarmerController extends Controller
 {
+    private const PROFILE_PREVIEW_LIMIT = 5;
+
     public function index(
         IndexFarmerRequest $request
     ): JsonResponse {
@@ -49,14 +51,17 @@ class FarmerController extends Controller
         $farmers = Farmer::query()
             ->withCount('listings')
             ->when(
-                $request->filled('search'),
+                $request->filled(
+                    'search'
+                ),
                 function (
                     Builder $query
                 ) use ($request): void {
                     $search = '%'
-                        .$request->validated(
-                            'search'
-                        )
+                        .$request
+                            ->validated(
+                                'search'
+                            )
                         .'%';
 
                     $query->where(
@@ -94,33 +99,42 @@ class FarmerController extends Controller
                 }
             )
             ->when(
-                $request->filled('state'),
+                $request->filled(
+                    'state'
+                ),
                 fn (Builder $query) =>
                     $query->where(
                         'state',
-                        $request->validated(
-                            'state'
-                        )
+                        $request
+                            ->validated(
+                                'state'
+                            )
                     )
             )
             ->when(
-                $request->filled('lga'),
+                $request->filled(
+                    'lga'
+                ),
                 fn (Builder $query) =>
                     $query->where(
                         'lga',
-                        $request->validated(
-                            'lga'
-                        )
+                        $request
+                            ->validated(
+                                'lga'
+                            )
                     )
             )
             ->when(
-                $request->filled('status'),
+                $request->filled(
+                    'status'
+                ),
                 fn (Builder $query) =>
                     $query->where(
                         'status',
-                        $request->validated(
-                            'status'
-                        )
+                        $request
+                            ->validated(
+                                'status'
+                            )
                     )
             )
             ->when(
@@ -130,19 +144,23 @@ class FarmerController extends Controller
                 fn (Builder $query) =>
                     $query->where(
                         'verification_status',
-                        $request->validated(
-                            'verification_status'
-                        )
+                        $request
+                            ->validated(
+                                'verification_status'
+                            )
                     )
             )
             ->orderBy(
                 $sort,
-                strtolower($order)
-                    === 'desc'
+                strtolower(
+                    $order
+                ) === 'desc'
                     ? 'desc'
                     : 'asc'
             )
-            ->paginate($perPage)
+            ->paginate(
+                $perPage
+            )
             ->withQueryString();
 
         return FarmerResource::collection(
@@ -170,59 +188,93 @@ class FarmerController extends Controller
     public function show(
         Farmer $farmer
     ): JsonResponse {
-        $farmer
-            ->load([
-                'listings' =>
-                    fn ($query) =>
-                        $query
-                            ->with([
-                                'produce.category',
-                                'farmer',
-                            ])
-                            ->orderByDesc(
-                                'created_at'
-                            ),
-            ])
-            ->loadCount(
-                'listings'
-            );
+        /*
+         * Keep the existing listings_count field
+         * available through FarmerResource.
+         */
+        $farmer->loadCount(
+            'listings'
+        );
 
-        $orders = Order::query()
-            ->whereHas(
-                'items',
-                fn (Builder $query) =>
-                    $query->where(
-                        'farmer_id',
-                        $farmer->id
-                    )
-            )
-            ->with([
-                'user',
+        /*
+         * Publication-state counts.
+         *
+         * Use publication_status rather than the
+         * temporary legacy status field.
+         */
+        $listingStatusCounts =
+            $farmer
+                ->listings()
+                ->selectRaw(
+                    'publication_status, COUNT(*) as aggregate'
+                )
+                ->groupBy(
+                    'publication_status'
+                )
+                ->pluck(
+                    'aggregate',
+                    'publication_status'
+                );
 
-                'items.produce.category',
-                'items.farmer',
+        /*
+         * Parent-order query scoped through this
+         * farmer's order_items.
+         *
+         * whereHas means a multi-farmer parent order
+         * is counted once for this farmer.
+         */
+        $farmerOrderQuery =
+            Order::query()
+                ->whereHas(
+                    'items',
+                    fn (Builder $query) =>
+                        $query->where(
+                            'farmer_id',
+                            $farmer->id
+                        )
+                );
 
-                // Legacy compatibility.
-                'listing.produce.category',
-                'listing.farmer',
-            ])
-            ->orderByDesc(
-                'created_at'
-            )
-            ->get();
+        $orderStatusCounts =
+            (clone $farmerOrderQuery)
+                ->selectRaw(
+                    'status, COUNT(*) as aggregate'
+                )
+                ->groupBy(
+                    'status'
+                )
+                ->pluck(
+                    'aggregate',
+                    'status'
+                );
 
         $ordersCount =
-            $orders->count();
+            $orderStatusCounts
+                ->sum();
 
         $completedOrdersCount =
-            $orders
-                ->filter(
-                    fn (Order $order) =>
-                        $order->status
-                        === OrderStatus::Delivered
+            (int) (
+                $orderStatusCounts->get(
+                    OrderStatus::Delivered
+                        ->value,
+                    0
+                )
+            );
+
+        $paidOrdersCount =
+            (clone $farmerOrderQuery)
+                ->where(
+                    'payment_status',
+                    PaymentStatus::Paid
+                        ->value
                 )
                 ->count();
 
+        /*
+         * Earnings remain line-item scoped.
+         *
+         * Never use parent order.total here because
+         * the checkout may contain other farmers.
+         */
         $totalEarned =
             OrderItem::query()
                 ->where(
@@ -242,6 +294,66 @@ class FarmerController extends Controller
                     'line_total'
                 );
 
+        /*
+         * Farmer detail is now a preview endpoint,
+         * not an unlimited history endpoint.
+         *
+         * Full paginated histories already exist at
+         * /farmers/{farmer}/listings and
+         * /farmers/{farmer}/orders.
+         */
+        $recentListings =
+            $farmer
+                ->listings()
+                ->with([
+                    'produce.category',
+                    'farmer',
+                ])
+                ->orderByDesc(
+                    'created_at'
+                )
+                ->orderByDesc('id')
+                ->limit(
+                    self::PROFILE_PREVIEW_LIMIT
+                )
+                ->get();
+
+        /*
+         * Eager-load ONLY this farmer's items.
+         *
+         * FarmerOrderSummaryResource can therefore
+         * calculate farmer_total safely on a
+         * multi-farmer order.
+         */
+        $recentOrders =
+            (clone $farmerOrderQuery)
+                ->with([
+                    'user',
+
+                    'items' =>
+                        function (
+                            $query
+                        ) use ($farmer): void {
+                            $query
+                                ->where(
+                                    'farmer_id',
+                                    $farmer->id
+                                )
+                                ->with([
+                                    'produce.category',
+                                    'farmer',
+                                ]);
+                        },
+                ])
+                ->orderByDesc(
+                    'created_at'
+                )
+                ->orderByDesc('id')
+                ->limit(
+                    self::PROFILE_PREVIEW_LIMIT
+                )
+                ->get();
+
         $profile = (
             new FarmerResource(
                 $farmer
@@ -250,32 +362,135 @@ class FarmerController extends Controller
             request()
         );
 
+        $formattedTotalEarned =
+            number_format(
+                (float) $totalEarned,
+                2,
+                '.',
+                ''
+            );
+
         return response()->json([
             'data' => [
                 ...$profile,
 
+                /*
+                 * Existing compatibility fields.
+                 */
                 'orders_count' =>
-                    $ordersCount,
+                    (int) $ordersCount,
 
                 'completed_orders_count' =>
                     $completedOrdersCount,
 
                 'total_earned' =>
-                    number_format(
-                        (float) $totalEarned,
-                        2,
-                        '.',
-                        ''
-                    ),
+                    $formattedTotalEarned,
+
+                /*
+                 * Preferred structured summary for
+                 * the farmer profile UI.
+                 */
+                'summary' => [
+                    'listings' => [
+                        'total' =>
+                            (int)
+                                $farmer
+                                    ->listings_count,
+
+                        'live' =>
+                            (int) (
+                                $listingStatusCounts
+                                    ->get(
+                                        ListingPublicationStatus::Live
+                                            ->value,
+                                        0
+                                    )
+                            ),
+
+                        'pending' =>
+                            (int) (
+                                $listingStatusCounts
+                                    ->get(
+                                        ListingPublicationStatus::Pending
+                                            ->value,
+                                        0
+                                    )
+                            ),
+
+                        'inactive' =>
+                            (int) (
+                                $listingStatusCounts
+                                    ->get(
+                                        ListingPublicationStatus::Inactive
+                                            ->value,
+                                        0
+                                    )
+                            ),
+                    ],
+
+                    'orders' => [
+                        'total' =>
+                            (int) $ordersCount,
+
+                        'new' =>
+                            (int) (
+                                $orderStatusCounts
+                                    ->get(
+                                        OrderStatus::New
+                                            ->value,
+                                        0
+                                    )
+                            ),
+
+                        'in_transit' =>
+                            (int) (
+                                $orderStatusCounts
+                                    ->get(
+                                        OrderStatus::InTransit
+                                            ->value,
+                                        0
+                                    )
+                            ),
+
+                        'delivered' =>
+                            $completedOrdersCount,
+
+                        'cancelled' =>
+                            (int) (
+                                $orderStatusCounts
+                                    ->get(
+                                        OrderStatus::Cancelled
+                                            ->value,
+                                        0
+                                    )
+                            ),
+                    ],
+
+                    'sales' => [
+                        'paid_orders_count' =>
+                            $paidOrdersCount,
+
+                        'total_earned' =>
+                            $formattedTotalEarned,
+                    ],
+                ],
+
+                /*
+                 * These arrays are intentionally previews.
+                 * Use the dedicated paginated endpoints
+                 * for complete histories.
+                 */
+                'preview_limit' =>
+                    self::PROFILE_PREVIEW_LIMIT,
 
                 'listings' =>
                     ListingResource::collection(
-                        $farmer->listings
+                        $recentListings
                     ),
 
                 'orders' =>
-                    OrderResource::collection(
-                        $orders
+                    FarmerOrderSummaryResource::collection(
+                        $recentOrders
                     ),
             ],
         ]);
@@ -429,11 +644,12 @@ class FarmerController extends Controller
         }
 
         /*
-         * Becoming inactive, pending, or rejected must
-         * immediately remove marketplace publication.
+         * Becoming inactive, pending, or rejected
+         * immediately removes marketplace publication.
          *
-         * Pending listings remain pending. Only currently
-         * live/active listings are forced inactive.
+         * Pending listings remain pending. Only
+         * currently live/active listings are forced
+         * inactive.
          */
         $farmer
             ->listings()
