@@ -169,7 +169,7 @@ class OrderController extends Controller
                          * Listing unit support will be added
                          * during the listings phase.
                          */
-                        'unit' => null,
+                        'unit' => $listing->unit,
 
                         'quantity' =>
                             $quantity,

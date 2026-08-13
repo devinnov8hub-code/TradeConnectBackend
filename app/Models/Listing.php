@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'farmer_id',
     'produce_id',
     'price',
+    'unit',
     'stock',
     'status',
 ])]
