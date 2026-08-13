@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api\V1;
 use App\Enums\ListingStatus;
 use App\Enums\OrderStatus;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Order\IndexOrderRequest;
 use App\Http\Requests\Order\StoreOrderRequest;
 use App\Http\Resources\OrderResource;
 use App\Models\Listing;
 use App\Models\Order;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -17,8 +19,30 @@ use Illuminate\Validation\ValidationException;
 class OrderController extends Controller
 {
     public function index(
-        Request $request
+        IndexOrderRequest $request
     ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        /*
+         * Always begin through the authenticated buyer's
+         * relationship so another buyer's orders can never
+         * enter the result set through search or filters.
+         */
         $orders = $request
             ->user()
             ->orders()
@@ -30,14 +54,108 @@ class OrderController extends Controller
                 'listing.produce.category',
                 'listing.farmer',
             ])
-            ->orderByDesc('created_at')
-            ->get();
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated(
+                            'search'
+                        )
+                        .'%';
 
-        return response()->json([
-            'data' => OrderResource::collection(
-                $orders
-            ),
-        ]);
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'orders.order_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'items',
+                                    function (
+                                        Builder $itemQuery
+                                    ) use ($search): void {
+                                        $itemQuery->where(
+                                            function (
+                                                Builder $query
+                                            ) use ($search): void {
+                                                $query
+                                                    ->where(
+                                                        'produce_name',
+                                                        'like',
+                                                        $search
+                                                    )
+                                                    ->orWhere(
+                                                        'category_name',
+                                                        'like',
+                                                        $search
+                                                    );
+                                            }
+                                        );
+                                    }
+                                )
+
+                                /*
+                                 * Temporary legacy support for
+                                 * orders that may still rely on
+                                 * orders.listing_id instead of
+                                 * order_items.
+                                 */
+                                ->orWhereHas(
+                                    'listing.produce',
+                                    function (
+                                        Builder $produceQuery
+                                    ) use ($search): void {
+                                        $produceQuery->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        );
+                                    }
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'payment_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.payment_status',
+                        $request->validated(
+                            'payment_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                'orders.'.$sort,
+                strtolower($order) === 'asc'
+                    ? 'asc'
+                    : 'desc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return OrderResource::collection(
+            $orders
+        )->response();
     }
 
     public function store(
@@ -165,11 +283,8 @@ class OrderController extends Controller
                                 ->produce
                                 ->category?->name,
 
-                        /*
-                         * Listing unit support will be added
-                         * during the listings phase.
-                         */
-                        'unit' => $listing->unit,
+                        'unit' =>
+                            $listing->unit,
 
                         'quantity' =>
                             $quantity,
@@ -330,7 +445,8 @@ class OrderController extends Controller
             !== $request->user()->id
         ) {
             return response()->json([
-                'message' => 'Order not found.',
+                'message' =>
+                    'Order not found.',
             ], 404);
         }
 
@@ -358,7 +474,8 @@ class OrderController extends Controller
             !== $request->user()->id
         ) {
             return response()->json([
-                'message' => 'Order not found.',
+                'message' =>
+                    'Order not found.',
             ], 404);
         }
 
