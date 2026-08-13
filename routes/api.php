@@ -132,6 +132,22 @@ Route::prefix('v1')->group(function () {
                 ProduceController::class
             );
 
+            Route::patch(
+                'farmers/{farmer}/status',
+                [
+                    FarmerController::class,
+                    'updateStatus',
+                ]
+            );
+
+            Route::patch(
+                'farmers/{farmer}/verification',
+                [
+                    FarmerController::class,
+                    'updateVerification',
+                ]
+            );
+
             Route::apiResource(
                 'farmers',
                 FarmerController::class

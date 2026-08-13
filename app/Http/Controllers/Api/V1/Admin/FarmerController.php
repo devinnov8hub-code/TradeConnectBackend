@@ -2,12 +2,16 @@
 
 namespace App\Http\Controllers\Api\V1\Admin;
 
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
 use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\IndexFarmerRequest;
 use App\Http\Requests\Admin\StoreFarmerRequest;
 use App\Http\Requests\Admin\UpdateFarmerRequest;
+use App\Http\Requests\Admin\UpdateFarmerStatusRequest;
+use App\Http\Requests\Admin\UpdateFarmerVerificationRequest;
 use App\Http\Resources\FarmerResource;
 use App\Http\Resources\ListingResource;
 use App\Http\Resources\OrderResource;
@@ -167,12 +171,6 @@ class FarmerController extends Controller
             ])
             ->loadCount('listings');
 
-        /*
-         * An order belongs to this farmer when one or more
-         * order_items belong to the farmer.
-         *
-         * This works correctly for multi-farmer orders.
-         */
         $orders = Order::query()
             ->whereHas(
                 'items',
@@ -206,11 +204,6 @@ class FarmerController extends Controller
                 )
                 ->count();
 
-        /*
-         * Only this farmer's item lines from orders whose
-         * payment has actually been confirmed count toward
-         * earnings.
-         */
         $totalEarned = OrderItem::query()
             ->where(
                 'farmer_id',
@@ -268,6 +261,78 @@ class FarmerController extends Controller
         $farmer->update(
             $request->validated()
         );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource($farmer),
+        ]);
+    }
+
+    public function updateStatus(
+        UpdateFarmerStatusRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $status = FarmerStatus::from(
+            $request->validated('status')
+        );
+
+        $farmer->forceFill([
+            'status' =>
+                $status,
+
+            /*
+             * Preserve the original suspension time when
+             * the same inactive request is repeated.
+             */
+            'suspended_at' =>
+                $status === FarmerStatus::Inactive
+                    ? (
+                        $farmer->suspended_at
+                        ?? now()
+                    )
+                    : null,
+        ])->save();
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource($farmer),
+        ]);
+    }
+
+    public function updateVerification(
+        UpdateFarmerVerificationRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $verificationStatus =
+            FarmerVerificationStatus::from(
+                $request->validated(
+                    'verification_status'
+                )
+            );
+
+        $farmer->forceFill([
+            'verification_status' =>
+                $verificationStatus,
+
+            /*
+             * Preserve the original verification time
+             * if "verified" is submitted repeatedly.
+             *
+             * Pending/rejected farmers are not verified.
+             */
+            'verified_at' =>
+                $verificationStatus
+                    === FarmerVerificationStatus::Verified
+                        ? (
+                            $farmer->verified_at
+                            ?? now()
+                        )
+                        : null,
+        ])->save();
 
         $farmer->refresh();
 
