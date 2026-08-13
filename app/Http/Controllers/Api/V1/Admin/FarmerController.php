@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\V1\Admin;
 
 use App\Enums\FarmerStatus;
 use App\Enums\FarmerVerificationStatus;
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
 use App\Enums\OrderStatus;
 use App\Enums\PaymentStatus;
 use App\Http\Controllers\Controller;
@@ -20,6 +22,7 @@ use App\Models\Order;
 use App\Models\OrderItem;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 
 class FarmerController extends Controller
 {
@@ -51,7 +54,9 @@ class FarmerController extends Controller
                     Builder $query
                 ) use ($request): void {
                     $search = '%'
-                        .$request->validated('search')
+                        .$request->validated(
+                            'search'
+                        )
                         .'%';
 
                     $query->where(
@@ -93,7 +98,9 @@ class FarmerController extends Controller
                 fn (Builder $query) =>
                     $query->where(
                         'state',
-                        $request->validated('state')
+                        $request->validated(
+                            'state'
+                        )
                     )
             )
             ->when(
@@ -101,7 +108,9 @@ class FarmerController extends Controller
                 fn (Builder $query) =>
                     $query->where(
                         'lga',
-                        $request->validated('lga')
+                        $request->validated(
+                            'lga'
+                        )
                     )
             )
             ->when(
@@ -109,7 +118,9 @@ class FarmerController extends Controller
                 fn (Builder $query) =>
                     $query->where(
                         'status',
-                        $request->validated('status')
+                        $request->validated(
+                            'status'
+                        )
                     )
             )
             ->when(
@@ -126,7 +137,8 @@ class FarmerController extends Controller
             )
             ->orderBy(
                 $sort,
-                strtolower($order) === 'desc'
+                strtolower($order)
+                    === 'desc'
                     ? 'desc'
                     : 'asc'
             )
@@ -149,7 +161,9 @@ class FarmerController extends Controller
 
         return response()->json([
             'data' =>
-                new FarmerResource($farmer),
+                new FarmerResource(
+                    $farmer
+                ),
         ], 201);
     }
 
@@ -169,7 +183,9 @@ class FarmerController extends Controller
                                 'created_at'
                             ),
             ])
-            ->loadCount('listings');
+            ->loadCount(
+                'listings'
+            );
 
         $orders = Order::query()
             ->whereHas(
@@ -182,6 +198,7 @@ class FarmerController extends Controller
             )
             ->with([
                 'user',
+
                 'items.produce.category',
                 'items.farmer',
 
@@ -189,7 +206,9 @@ class FarmerController extends Controller
                 'listing.produce.category',
                 'listing.farmer',
             ])
-            ->orderByDesc('created_at')
+            ->orderByDesc(
+                'created_at'
+            )
             ->get();
 
         $ordersCount =
@@ -204,24 +223,32 @@ class FarmerController extends Controller
                 )
                 ->count();
 
-        $totalEarned = OrderItem::query()
-            ->where(
-                'farmer_id',
-                $farmer->id
-            )
-            ->whereHas(
-                'order',
-                fn (Builder $query) =>
-                    $query->where(
-                        'payment_status',
-                        PaymentStatus::Paid->value
-                    )
-            )
-            ->sum('line_total');
+        $totalEarned =
+            OrderItem::query()
+                ->where(
+                    'farmer_id',
+                    $farmer->id
+                )
+                ->whereHas(
+                    'order',
+                    fn (Builder $query) =>
+                        $query->where(
+                            'payment_status',
+                            PaymentStatus::Paid
+                                ->value
+                        )
+                )
+                ->sum(
+                    'line_total'
+                );
 
         $profile = (
-            new FarmerResource($farmer)
-        )->toArray(request());
+            new FarmerResource(
+                $farmer
+            )
+        )->toArray(
+            request()
+        );
 
         return response()->json([
             'data' => [
@@ -266,7 +293,9 @@ class FarmerController extends Controller
 
         return response()->json([
             'data' =>
-                new FarmerResource($farmer),
+                new FarmerResource(
+                    $farmer
+                ),
         ]);
     }
 
@@ -274,32 +303,52 @@ class FarmerController extends Controller
         UpdateFarmerStatusRequest $request,
         Farmer $farmer
     ): JsonResponse {
-        $status = FarmerStatus::from(
-            $request->validated('status')
+        $status =
+            FarmerStatus::from(
+                $request->validated(
+                    'status'
+                )
+            );
+
+        DB::transaction(
+            function () use (
+                $farmer,
+                $status
+            ): void {
+                $farmer->forceFill([
+                    'status' =>
+                        $status,
+
+                    /*
+                     * Preserve the original suspension time
+                     * when the same inactive request is
+                     * repeated.
+                     */
+                    'suspended_at' =>
+                        $status
+                        === FarmerStatus::Inactive
+                            ? (
+                                $farmer
+                                    ->suspended_at
+                                ?? now()
+                            )
+                            : null,
+                ])->save();
+
+                $this
+                    ->unpublishListingsIfIneligible(
+                        $farmer
+                    );
+            }
         );
-
-        $farmer->forceFill([
-            'status' =>
-                $status,
-
-            /*
-             * Preserve the original suspension time when
-             * the same inactive request is repeated.
-             */
-            'suspended_at' =>
-                $status === FarmerStatus::Inactive
-                    ? (
-                        $farmer->suspended_at
-                        ?? now()
-                    )
-                    : null,
-        ])->save();
 
         $farmer->refresh();
 
         return response()->json([
             'data' =>
-                new FarmerResource($farmer),
+                new FarmerResource(
+                    $farmer
+                ),
         ]);
     }
 
@@ -314,31 +363,47 @@ class FarmerController extends Controller
                 )
             );
 
-        $farmer->forceFill([
-            'verification_status' =>
-                $verificationStatus,
-
-            /*
-             * Preserve the original verification time
-             * if "verified" is submitted repeatedly.
-             *
-             * Pending/rejected farmers are not verified.
-             */
-            'verified_at' =>
+        DB::transaction(
+            function () use (
+                $farmer,
                 $verificationStatus
-                    === FarmerVerificationStatus::Verified
-                        ? (
-                            $farmer->verified_at
-                            ?? now()
-                        )
-                        : null,
-        ])->save();
+            ): void {
+                $farmer->forceFill([
+                    'verification_status' =>
+                        $verificationStatus,
+
+                    /*
+                     * Preserve the original verification time
+                     * if "verified" is submitted repeatedly.
+                     *
+                     * Pending/rejected farmers are not
+                     * verified.
+                     */
+                    'verified_at' =>
+                        $verificationStatus
+                        === FarmerVerificationStatus::Verified
+                            ? (
+                                $farmer
+                                    ->verified_at
+                                ?? now()
+                            )
+                            : null,
+                ])->save();
+
+                $this
+                    ->unpublishListingsIfIneligible(
+                        $farmer
+                    );
+            }
+        );
 
         $farmer->refresh();
 
         return response()->json([
             'data' =>
-                new FarmerResource($farmer),
+                new FarmerResource(
+                    $farmer
+                ),
         ]);
     }
 
@@ -351,5 +416,52 @@ class FarmerController extends Controller
             'message' =>
                 'Farmer deleted.',
         ]);
+    }
+
+    private function unpublishListingsIfIneligible(
+        Farmer $farmer
+    ): void {
+        if (
+            $farmer
+                ->canPublishListings()
+        ) {
+            return;
+        }
+
+        /*
+         * Becoming inactive, pending, or rejected must
+         * immediately remove marketplace publication.
+         *
+         * Pending listings remain pending. Only currently
+         * live/active listings are forced inactive.
+         */
+        $farmer
+            ->listings()
+            ->where(
+                function (
+                    Builder $query
+                ): void {
+                    $query
+                        ->where(
+                            'publication_status',
+                            ListingPublicationStatus::Live
+                                ->value
+                        )
+                        ->orWhere(
+                            'status',
+                            ListingStatus::Active
+                                ->value
+                        );
+                }
+            )
+            ->update([
+                'publication_status' =>
+                    ListingPublicationStatus::Inactive
+                        ->value,
+
+                'status' =>
+                    ListingStatus::Inactive
+                        ->value,
+            ]);
     }
 }

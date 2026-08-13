@@ -188,70 +188,170 @@ class UpdateListingRequest extends ApiFormRequest
             function (
                 Validator $validator
             ): void {
-                /*
-                 * Do not suppress pricing validation merely
-                 * because an unrelated listing field failed.
-                 */
-                if (
+                $pricingHasErrors =
                     $validator
                         ->errors()
                         ->has('price')
                     || $validator
                         ->errors()
-                        ->has('original_price')
-                    || $validator
-                        ->errors()
-                        ->has('discount_percent')
-                ) {
-                    return;
-                }
-
-                /** @var Listing $listing */
-                $listing =
-                    $this->route(
-                        'listing'
-                    );
-
-                $price =
-                    $this->has('price')
-                        ? (float) $this->input(
-                            'price'
-                        )
-                        : (float) $listing
-                            ->price;
-
-                $originalPrice =
-                    $this->has(
-                        'original_price'
-                    )
-                        ? $this->input(
+                        ->has(
                             'original_price'
                         )
-                        : $listing
-                            ->original_price;
+                    || $validator
+                        ->errors()
+                        ->has(
+                            'discount_percent'
+                        );
 
-                /*
-                 * Only validate a percentage supplied by
-                 * the caller. Otherwise the Listing model
-                 * derives it from the final prices.
-                 */
-                $discountPercent =
-                    $this->has(
-                        'discount_percent'
-                    )
-                        ? $this->input(
+                if (! $pricingHasErrors) {
+                    /** @var Listing $listing */
+                    $listing =
+                        $this->route(
+                            'listing'
+                        );
+
+                    $price =
+                        $this->has('price')
+                            ? (float) $this->input(
+                                'price'
+                            )
+                            : (float) $listing
+                                ->price;
+
+                    $originalPrice =
+                        $this->has(
+                            'original_price'
+                        )
+                            ? $this->input(
+                                'original_price'
+                            )
+                            : $listing
+                                ->original_price;
+
+                    $discountPercent =
+                        $this->has(
                             'discount_percent'
                         )
-                        : null;
+                            ? $this->input(
+                                'discount_percent'
+                            )
+                            : null;
 
-                $this->validatePricing(
-                    $validator,
-                    $price,
-                    $originalPrice,
-                    $discountPercent
-                );
+                    $this->validatePricing(
+                        $validator,
+                        $price,
+                        $originalPrice,
+                        $discountPercent
+                    );
+                }
+
+                $this
+                    ->validatePublicationEligibility(
+                        $validator
+                    );
             }
         );
+    }
+
+    private function validatePublicationEligibility(
+        Validator $validator
+    ): void {
+        /*
+         * Only explicit publication-state changes are
+         * checked here.
+         *
+         * This lets an administrator still edit metadata
+         * on an anomalous legacy record if needed.
+         */
+        if (
+            ! $this->has(
+                'publication_status'
+            )
+            && ! $this->has('status')
+        ) {
+            return;
+        }
+
+        if (
+            $validator
+                ->errors()
+                ->has(
+                    'publication_status'
+                )
+            || $validator
+                ->errors()
+                ->has('status')
+        ) {
+            return;
+        }
+
+        $targetStatus =
+            $this->targetPublicationStatus();
+
+        if (
+            $targetStatus
+            !== ListingPublicationStatus::Live
+        ) {
+            return;
+        }
+
+        /** @var Listing $listing */
+        $listing =
+            $this->route('listing');
+
+        $listing->loadMissing(
+            'farmer'
+        );
+
+        if (
+            $listing
+                ->farmer
+                ->canPublishListings()
+        ) {
+            return;
+        }
+
+        $field =
+            $this->has(
+                'publication_status'
+            )
+                ? 'publication_status'
+                : 'status';
+
+        $validator
+            ->errors()
+            ->add(
+                $field,
+                'Listing cannot be published because the farmer must be active and verified.'
+            );
+    }
+
+    private function targetPublicationStatus():
+        ListingPublicationStatus
+    {
+        if (
+            $this->has(
+                'publication_status'
+            )
+        ) {
+            return ListingPublicationStatus::from(
+                (string) $this->input(
+                    'publication_status'
+                )
+            );
+        }
+
+        $legacyStatus =
+            ListingStatus::from(
+                (string) $this->input(
+                    'status'
+                )
+            );
+
+        return $legacyStatus
+            === ListingStatus::Active
+                ? ListingPublicationStatus::Live
+                : ListingPublicationStatus::Inactive;
     }
 
     private function validatePricing(

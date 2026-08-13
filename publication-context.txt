@@ -1,0 +1,2498 @@
+=== app/Models/Farmer.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+
+#[Fillable([
+    'name',
+    'email',
+    'state',
+    'lga',
+    'phone_number',
+    'address',
+    'gender',
+    'date_of_birth',
+    'farm_name',
+    'farm_size_hectares',
+    'farming_method',
+    'years_experience',
+    'farm_address',
+    'status',
+    'verification_status',
+    'verified_at',
+    'suspended_at',
+])]
+class Farmer extends Model
+{
+    protected $attributes = [
+        'verification_status' => 'pending',
+    ];
+
+    protected static function booted(): void
+    {
+        static::created(
+            function (Farmer $farmer): void {
+                /*
+                 * Generate the public farmer code from the
+                 * database ID so concurrent farmer creation
+                 * cannot generate the same code.
+                 */
+                if (! $farmer->farmer_code) {
+                    $farmer->forceFill([
+                        'farmer_code' =>
+                            'FAR-'
+                            .str_pad(
+                                (string) $farmer->id,
+                                6,
+                                '0',
+                                STR_PAD_LEFT
+                            ),
+                    ])->saveQuietly();
+                }
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'status' =>
+                FarmerStatus::class,
+
+            'verification_status' =>
+                FarmerVerificationStatus::class,
+
+            'date_of_birth' =>
+                'date',
+
+            'farm_size_hectares' =>
+                'decimal:2',
+
+            'years_experience' =>
+                'integer',
+
+            'verified_at' =>
+                'datetime',
+
+            'suspended_at' =>
+                'datetime',
+        ];
+    }
+
+    public function listings(): HasMany
+    {
+        return $this->hasMany(
+            Listing::class
+        );
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    /*
+     * Legacy relationship.
+     *
+     * New multi-item order reporting should use
+     * orderItems rather than relying on orders.listing_id.
+     */
+    public function orders(): HasManyThrough
+    {
+        return $this->hasManyThrough(
+            Order::class,
+            Listing::class
+        );
+    }
+}
+
+=== app/Enums/FarmerStatus.php ===
+<?php
+
+namespace App\Enums;
+
+enum FarmerStatus: string
+{
+    case Active = 'active';
+    case Inactive = 'inactive';
+}
+
+=== app/Enums/FarmerVerificationStatus.php ===
+<?php
+
+namespace App\Enums;
+
+enum FarmerVerificationStatus: string
+{
+    case Pending = 'pending';
+    case Verified = 'verified';
+    case Rejected = 'rejected';
+}
+
+=== app/Models/Listing.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+#[Fillable([
+    'farmer_id',
+    'produce_id',
+
+    'price',
+    'original_price',
+    'discount_percent',
+
+    'unit',
+    'stock',
+    'minimum_order_quantity',
+
+    'description',
+    'label',
+    'grade',
+    'available_from',
+
+    /*
+     * status remains temporarily for legacy
+     * active/inactive compatibility.
+     */
+    'status',
+
+    'publication_status',
+])]
+class Listing extends Model
+{
+    /*
+     * Listing images are part of the standard listing
+     * representation. Eager loading here prevents an
+     * N+1 problem across marketplace/admin pages.
+     */
+    protected $with = [
+        'images',
+    ];
+
+    protected static function booted(): void
+    {
+        static::saving(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->synchronisePublicationState();
+
+                $listing
+                    ->synchroniseDiscount();
+            }
+        );
+
+        /*
+         * Database cascading removes image rows, but
+         * the actual files live outside the database.
+         *
+         * Delete child models explicitly so their
+         * filesystem cleanup event runs.
+         */
+        static::deleting(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->images()
+                    ->get()
+                    ->each(
+                        fn (
+                            ListingImage $image
+                        ) =>
+                            $image->delete()
+                    );
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'price' =>
+                'decimal:2',
+
+            'original_price' =>
+                'decimal:2',
+
+            'discount_percent' =>
+                'decimal:2',
+
+            'minimum_order_quantity' =>
+                'decimal:2',
+
+            'available_from' =>
+                'date',
+
+            'status' =>
+                ListingStatus::class,
+
+            'publication_status' =>
+                ListingPublicationStatus::class,
+
+            'published_at' =>
+                'datetime',
+        ];
+    }
+
+    /*
+     * Legacy single-listing order relationship.
+     */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(
+            Order::class
+        );
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    public function images(): HasMany
+    {
+        return $this
+            ->hasMany(
+                ListingImage::class
+            )
+            ->orderBy(
+                'position'
+            )
+            ->orderBy('id');
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(
+            Farmer::class
+        );
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(
+            Produce::class
+        );
+    }
+
+    public function isAvailable(): bool
+    {
+        if (
+            $this->publication_status
+            !== ListingPublicationStatus::Live
+        ) {
+            return false;
+        }
+
+        if (
+            $this->status
+            !== ListingStatus::Active
+        ) {
+            return false;
+        }
+
+        if (
+            $this->available_from !== null
+            && $this
+                ->available_from
+                ->gt(
+                    now()
+                        ->startOfDay()
+                )
+        ) {
+            return false;
+        }
+
+        return (float) $this->stock
+            >= (float) $this
+                ->minimum_order_quantity;
+    }
+
+    private function synchronisePublicationState(): void
+    {
+        if (! $this->exists) {
+            $attributes =
+                $this->getAttributes();
+
+            $publicationProvided =
+                array_key_exists(
+                    'publication_status',
+                    $attributes
+                )
+                && $attributes[
+                    'publication_status'
+                ] !== null;
+
+            if ($publicationProvided) {
+                $this
+                    ->synchroniseLegacyStatusFromPublication();
+            } elseif (
+                array_key_exists(
+                    'status',
+                    $attributes
+                )
+                && $attributes[
+                    'status'
+                ] !== null
+            ) {
+                $this
+                    ->synchronisePublicationFromLegacyStatus();
+            } else {
+                $this->publication_status =
+                    ListingPublicationStatus::Pending;
+
+                $this->status =
+                    ListingStatus::Inactive;
+            }
+        } elseif (
+            $this->isDirty(
+                'publication_status'
+            )
+        ) {
+            $this
+                ->synchroniseLegacyStatusFromPublication();
+        } elseif (
+            $this->isDirty(
+                'status'
+            )
+        ) {
+            $this
+                ->synchronisePublicationFromLegacyStatus();
+        }
+
+        if (
+            $this->publication_status
+                === ListingPublicationStatus::Live
+            && $this->published_at
+                === null
+        ) {
+            $this->published_at =
+                now();
+        }
+    }
+
+    private function synchroniseLegacyStatusFromPublication(): void
+    {
+        $this->status =
+            $this->publication_status
+                === ListingPublicationStatus::Live
+                    ? ListingStatus::Active
+                    : ListingStatus::Inactive;
+    }
+
+    private function synchronisePublicationFromLegacyStatus(): void
+    {
+        $this->publication_status =
+            $this->status
+                === ListingStatus::Active
+                    ? ListingPublicationStatus::Live
+                    : ListingPublicationStatus::Inactive;
+    }
+
+    private function synchroniseDiscount(): void
+    {
+        if (
+            $this->original_price === null
+        ) {
+            $this->discount_percent =
+                null;
+
+            return;
+        }
+
+        $originalPrice =
+            (float) $this
+                ->original_price;
+
+        $currentPrice =
+            (float) $this->price;
+
+        if (
+            $originalPrice <= 0
+        ) {
+            $this->discount_percent =
+                '0.00';
+
+            return;
+        }
+
+        $discount =
+            (
+                (
+                    $originalPrice
+                    - $currentPrice
+                )
+                / $originalPrice
+            )
+            * 100;
+
+        $this->discount_percent =
+            number_format(
+                max(
+                    0,
+                    round(
+                        $discount,
+                        2
+                    )
+                ),
+                2,
+                '.',
+                ''
+            );
+    }
+}
+
+=== app/Enums/ListingPublicationStatus.php ===
+<?php
+
+namespace App\Enums;
+
+enum ListingPublicationStatus: string
+{
+    case Pending = 'pending';
+    case Live = 'live';
+    case Inactive = 'inactive';
+}
+
+=== StoreListingRequest ===
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
+
+class StoreListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        $farmer =
+            $this->route('farmer');
+
+        return [
+            'produce_id' => [
+                'required',
+                'integer',
+                'exists:produce,id',
+
+                Rule::unique(
+                    'listings',
+                    'produce_id'
+                )->where(
+                    'farmer_id',
+                    $farmer->id
+                ),
+            ],
+
+            'price' => [
+                'required',
+                'numeric',
+                'min:0',
+            ],
+
+            'original_price' => [
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+
+            'discount_percent' => [
+                'nullable',
+                'numeric',
+                'min:0',
+                'max:100',
+            ],
+
+            'unit' => [
+                'required',
+                'string',
+                'max:50',
+            ],
+
+            'stock' => [
+                'required',
+                'integer',
+                'min:0',
+            ],
+
+            'minimum_order_quantity' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'description' => [
+                'nullable',
+                'string',
+                'max:5000',
+            ],
+
+            'label' => [
+                'nullable',
+                'string',
+
+                Rule::in([
+                    'fresh',
+                    'organic',
+                    'seasonal',
+                ]),
+            ],
+
+            'grade' => [
+                'nullable',
+                'string',
+                'max:100',
+            ],
+
+            'available_from' => [
+                'nullable',
+                'date',
+            ],
+
+            /*
+             * Legacy client compatibility.
+             */
+            'status' => [
+                'sometimes',
+                Rule::enum(
+                    ListingStatus::class
+                ),
+            ],
+
+            /*
+             * Preferred new publication state.
+             */
+            'publication_status' => [
+                'sometimes',
+                Rule::enum(
+                    ListingPublicationStatus::class
+                ),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'produce_id.required' =>
+                'Produce is required.',
+
+            'produce_id.exists' =>
+                'Produce not found.',
+
+            'produce_id.unique' =>
+                'This farmer already has a listing for this produce.',
+
+            'price.required' =>
+                'Price is required.',
+
+            'price.min' =>
+                'Price must be at least 0.',
+
+            'original_price.min' =>
+                'Original price must be at least 0.',
+
+            'discount_percent.min' =>
+                'Discount percent must be at least 0.',
+
+            'discount_percent.max' =>
+                'Discount percent cannot exceed 100.',
+
+            'unit.required' =>
+                'Unit is required.',
+
+            'unit.max' =>
+                'Unit cannot exceed 50 characters.',
+
+            'stock.required' =>
+                'Stock is required.',
+
+            'stock.min' =>
+                'Stock must be at least 0.',
+
+            'minimum_order_quantity.min' =>
+                'Minimum order quantity must be at least 1.',
+
+            'description.max' =>
+                'Description cannot exceed 5000 characters.',
+
+            'label.in' =>
+                'Label must be fresh, organic, or seasonal.',
+
+            'grade.max' =>
+                'Grade cannot exceed 100 characters.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'publication_status.enum' =>
+                'Publication status must be pending, live, or inactive.',
+        ];
+    }
+
+    public function withValidator(
+        Validator $validator
+    ): void {
+        $validator->after(
+            function (
+                Validator $validator
+            ): void {
+                /*
+                 * An unrelated validation failure such as
+                 * label must not prevent us from reporting
+                 * pricing errors too.
+                 *
+                 * Only skip the custom pricing calculation
+                 * when one of its own inputs failed normal
+                 * validation.
+                 */
+                if (
+                    $validator
+                        ->errors()
+                        ->has('price')
+                    || $validator
+                        ->errors()
+                        ->has('original_price')
+                    || $validator
+                        ->errors()
+                        ->has('discount_percent')
+                ) {
+                    return;
+                }
+
+                $this->validatePricing(
+                    $validator,
+                    (float) $this->input(
+                        'price'
+                    ),
+                    $this->input(
+                        'original_price'
+                    ),
+                    $this->input(
+                        'discount_percent'
+                    )
+                );
+            }
+        );
+    }
+
+    private function validatePricing(
+        Validator $validator,
+        float $price,
+        mixed $originalPrice,
+        mixed $discountPercent
+    ): void {
+        if (
+            $originalPrice === null
+        ) {
+            if (
+                $discountPercent !== null
+            ) {
+                $validator
+                    ->errors()
+                    ->add(
+                        'original_price',
+                        'Original price is required when a discount percent is supplied.'
+                    );
+            }
+
+            return;
+        }
+
+        $originalPrice =
+            (float) $originalPrice;
+
+        if (
+            $originalPrice < $price
+        ) {
+            $validator
+                ->errors()
+                ->add(
+                    'original_price',
+                    'Original price cannot be less than the current selling price.'
+                );
+
+            return;
+        }
+
+        if (
+            $discountPercent === null
+        ) {
+            return;
+        }
+
+        $expectedDiscount =
+            $originalPrice > 0
+                ? round(
+                    (
+                        (
+                            $originalPrice
+                            - $price
+                        )
+                        / $originalPrice
+                    )
+                    * 100,
+                    2
+                )
+                : 0.0;
+
+        if (
+            abs(
+                (float) $discountPercent
+                - $expectedDiscount
+            ) > 0.01
+        ) {
+            $validator
+                ->errors()
+                ->add(
+                    'discount_percent',
+                    'Discount percent does not match the original and current prices.'
+                );
+        }
+    }
+}
+
+=== UpdateListingRequest ===
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use App\Models\Listing;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
+
+class UpdateListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        /** @var Listing $listing */
+        $listing =
+            $this->route('listing');
+
+        return [
+            'produce_id' => [
+                'sometimes',
+                'integer',
+                'exists:produce,id',
+
+                Rule::unique(
+                    'listings',
+                    'produce_id'
+                )
+                    ->where(
+                        'farmer_id',
+                        $listing->farmer_id
+                    )
+                    ->ignore(
+                        $listing
+                    ),
+            ],
+
+            'price' => [
+                'sometimes',
+                'numeric',
+                'min:0',
+            ],
+
+            'original_price' => [
+                'sometimes',
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+
+            'discount_percent' => [
+                'sometimes',
+                'nullable',
+                'numeric',
+                'min:0',
+                'max:100',
+            ],
+
+            'unit' => [
+                'sometimes',
+                'string',
+                'max:50',
+            ],
+
+            'stock' => [
+                'sometimes',
+                'integer',
+                'min:0',
+            ],
+
+            'minimum_order_quantity' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'description' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:5000',
+            ],
+
+            'label' => [
+                'sometimes',
+                'nullable',
+                'string',
+
+                Rule::in([
+                    'fresh',
+                    'organic',
+                    'seasonal',
+                ]),
+            ],
+
+            'grade' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:100',
+            ],
+
+            'available_from' => [
+                'sometimes',
+                'nullable',
+                'date',
+            ],
+
+            /*
+             * Legacy compatibility state.
+             */
+            'status' => [
+                'sometimes',
+                Rule::enum(
+                    ListingStatus::class
+                ),
+            ],
+
+            /*
+             * Preferred publication state.
+             */
+            'publication_status' => [
+                'sometimes',
+                Rule::enum(
+                    ListingPublicationStatus::class
+                ),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'produce_id.exists' =>
+                'Produce not found.',
+
+            'produce_id.unique' =>
+                'This farmer already has a listing for this produce.',
+
+            'price.min' =>
+                'Price must be at least 0.',
+
+            'original_price.min' =>
+                'Original price must be at least 0.',
+
+            'discount_percent.min' =>
+                'Discount percent must be at least 0.',
+
+            'discount_percent.max' =>
+                'Discount percent cannot exceed 100.',
+
+            'unit.max' =>
+                'Unit cannot exceed 50 characters.',
+
+            'stock.min' =>
+                'Stock must be at least 0.',
+
+            'minimum_order_quantity.min' =>
+                'Minimum order quantity must be at least 1.',
+
+            'description.max' =>
+                'Description cannot exceed 5000 characters.',
+
+            'label.in' =>
+                'Label must be fresh, organic, or seasonal.',
+
+            'grade.max' =>
+                'Grade cannot exceed 100 characters.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'publication_status.enum' =>
+                'Publication status must be pending, live, or inactive.',
+        ];
+    }
+
+    public function withValidator(
+        Validator $validator
+    ): void {
+        $validator->after(
+            function (
+                Validator $validator
+            ): void {
+                /*
+                 * Do not suppress pricing validation merely
+                 * because an unrelated listing field failed.
+                 */
+                if (
+                    $validator
+                        ->errors()
+                        ->has('price')
+                    || $validator
+                        ->errors()
+                        ->has('original_price')
+                    || $validator
+                        ->errors()
+                        ->has('discount_percent')
+                ) {
+                    return;
+                }
+
+                /** @var Listing $listing */
+                $listing =
+                    $this->route(
+                        'listing'
+                    );
+
+                $price =
+                    $this->has('price')
+                        ? (float) $this->input(
+                            'price'
+                        )
+                        : (float) $listing
+                            ->price;
+
+                $originalPrice =
+                    $this->has(
+                        'original_price'
+                    )
+                        ? $this->input(
+                            'original_price'
+                        )
+                        : $listing
+                            ->original_price;
+
+                /*
+                 * Only validate a percentage supplied by
+                 * the caller. Otherwise the Listing model
+                 * derives it from the final prices.
+                 */
+                $discountPercent =
+                    $this->has(
+                        'discount_percent'
+                    )
+                        ? $this->input(
+                            'discount_percent'
+                        )
+                        : null;
+
+                $this->validatePricing(
+                    $validator,
+                    $price,
+                    $originalPrice,
+                    $discountPercent
+                );
+            }
+        );
+    }
+
+    private function validatePricing(
+        Validator $validator,
+        float $price,
+        mixed $originalPrice,
+        mixed $discountPercent
+    ): void {
+        if (
+            $originalPrice === null
+        ) {
+            if (
+                $discountPercent !== null
+            ) {
+                $validator
+                    ->errors()
+                    ->add(
+                        'original_price',
+                        'Original price is required when a discount percent is supplied.'
+                    );
+            }
+
+            return;
+        }
+
+        $originalPrice =
+            (float) $originalPrice;
+
+        if (
+            $originalPrice < $price
+        ) {
+            $validator
+                ->errors()
+                ->add(
+                    'original_price',
+                    'Original price cannot be less than the current selling price.'
+                );
+
+            return;
+        }
+
+        if (
+            $discountPercent === null
+        ) {
+            return;
+        }
+
+        $expectedDiscount =
+            $originalPrice > 0
+                ? round(
+                    (
+                        (
+                            $originalPrice
+                            - $price
+                        )
+                        / $originalPrice
+                    )
+                    * 100,
+                    2
+                )
+                : 0.0;
+
+        if (
+            abs(
+                (float) $discountPercent
+                - $expectedDiscount
+            ) > 0.01
+        ) {
+            $validator
+                ->errors()
+                ->add(
+                    'discount_percent',
+                    'Discount percent does not match the original and current prices.'
+                );
+        }
+    }
+}
+
+=== Admin FarmerController ===
+<?php
+
+namespace App\Http\Controllers\Api\V1\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerRequest;
+use App\Http\Requests\Admin\StoreFarmerRequest;
+use App\Http\Requests\Admin\UpdateFarmerRequest;
+use App\Http\Requests\Admin\UpdateFarmerStatusRequest;
+use App\Http\Requests\Admin\UpdateFarmerVerificationRequest;
+use App\Http\Resources\FarmerResource;
+use App\Http\Resources\ListingResource;
+use App\Http\Resources\OrderResource;
+use App\Models\Farmer;
+use App\Models\Order;
+use App\Models\OrderItem;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+
+class FarmerController extends Controller
+{
+    public function index(
+        IndexFarmerRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'name'
+        ) ?? 'name';
+
+        $order = $request->validated(
+            'order',
+            'asc'
+        ) ?? 'asc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $farmers = Farmer::query()
+            ->withCount('listings')
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'name',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'farmer_code',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'email',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'phone_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'farm_name',
+                                    'like',
+                                    $search
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('state'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'state',
+                        $request->validated('state')
+                    )
+            )
+            ->when(
+                $request->filled('lga'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'lga',
+                        $request->validated('lga')
+                    )
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'status',
+                        $request->validated('status')
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'verification_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'verification_status',
+                        $request->validated(
+                            'verification_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                $sort,
+                strtolower($order) === 'desc'
+                    ? 'desc'
+                    : 'asc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return FarmerResource::collection(
+            $farmers
+        )->response();
+    }
+
+    public function store(
+        StoreFarmerRequest $request
+    ): JsonResponse {
+        $farmer = Farmer::create(
+            $request->validated()
+        );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource($farmer),
+        ], 201);
+    }
+
+    public function show(
+        Farmer $farmer
+    ): JsonResponse {
+        $farmer
+            ->load([
+                'listings' =>
+                    fn ($query) =>
+                        $query
+                            ->with([
+                                'produce.category',
+                                'farmer',
+                            ])
+                            ->orderByDesc(
+                                'created_at'
+                            ),
+            ])
+            ->loadCount('listings');
+
+        $orders = Order::query()
+            ->whereHas(
+                'items',
+                fn (Builder $query) =>
+                    $query->where(
+                        'farmer_id',
+                        $farmer->id
+                    )
+            )
+            ->with([
+                'user',
+                'items.produce.category',
+                'items.farmer',
+
+                // Legacy compatibility.
+                'listing.produce.category',
+                'listing.farmer',
+            ])
+            ->orderByDesc('created_at')
+            ->get();
+
+        $ordersCount =
+            $orders->count();
+
+        $completedOrdersCount =
+            $orders
+                ->filter(
+                    fn (Order $order) =>
+                        $order->status
+                        === OrderStatus::Delivered
+                )
+                ->count();
+
+        $totalEarned = OrderItem::query()
+            ->where(
+                'farmer_id',
+                $farmer->id
+            )
+            ->whereHas(
+                'order',
+                fn (Builder $query) =>
+                    $query->where(
+                        'payment_status',
+                        PaymentStatus::Paid->value
+                    )
+            )
+            ->sum('line_total');
+
+        $profile = (
+            new FarmerResource($farmer)
+        )->toArray(request());
+
+        return response()->json([
+            'data' => [
+                ...$profile,
+
+                'orders_count' =>
+                    $ordersCount,
+
+                'completed_orders_count' =>
+                    $completedOrdersCount,
+
+                'total_earned' =>
+                    number_format(
+                        (float) $totalEarned,
+                        2,
+                        '.',
+                        ''
+                    ),
+
+                'listings' =>
+                    ListingResource::collection(
+                        $farmer->listings
+                    ),
+
+                'orders' =>
+                    OrderResource::collection(
+                        $orders
+                    ),
+            ],
+        ]);
+    }
+
+    public function update(
+        UpdateFarmerRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $farmer->update(
+            $request->validated()
+        );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource($farmer),
+        ]);
+    }
+
+    public function updateStatus(
+        UpdateFarmerStatusRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $status = FarmerStatus::from(
+            $request->validated('status')
+        );
+
+        $farmer->forceFill([
+            'status' =>
+                $status,
+
+            /*
+             * Preserve the original suspension time when
+             * the same inactive request is repeated.
+             */
+            'suspended_at' =>
+                $status === FarmerStatus::Inactive
+                    ? (
+                        $farmer->suspended_at
+                        ?? now()
+                    )
+                    : null,
+        ])->save();
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource($farmer),
+        ]);
+    }
+
+    public function updateVerification(
+        UpdateFarmerVerificationRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $verificationStatus =
+            FarmerVerificationStatus::from(
+                $request->validated(
+                    'verification_status'
+                )
+            );
+
+        $farmer->forceFill([
+            'verification_status' =>
+                $verificationStatus,
+
+            /*
+             * Preserve the original verification time
+             * if "verified" is submitted repeatedly.
+             *
+             * Pending/rejected farmers are not verified.
+             */
+            'verified_at' =>
+                $verificationStatus
+                    === FarmerVerificationStatus::Verified
+                        ? (
+                            $farmer->verified_at
+                            ?? now()
+                        )
+                        : null,
+        ])->save();
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource($farmer),
+        ]);
+    }
+
+    public function destroy(
+        Farmer $farmer
+    ): JsonResponse {
+        $farmer->delete();
+
+        return response()->json([
+            'message' =>
+                'Farmer deleted.',
+        ]);
+    }
+}
+
+=== Farmer requests ===
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'category_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:categories,id',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(ListingStatus::class),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'created_at',
+                    'price',
+                    'stock',
+                    'produce',
+                    'category',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'category_id.exists' =>
+                'Category not found.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'sort.in' =>
+                'Sort must be one of: created_at, price, stock, produce, category.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerOrderRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerOrderRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(OrderStatus::class),
+            ],
+
+            'payment_status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(PaymentStatus::class),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'created_at',
+                    'order_number',
+                    'total',
+                    'status',
+                    'payment_status',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.enum' =>
+                'Status must be new, in_transit, cancelled, or delivered.',
+
+            'payment_status.enum' =>
+                'Payment status must be pending, paid, failed, or refunded.',
+
+            'sort.in' =>
+                'Sort must be one of: created_at, order_number, total, status, payment_status.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'state' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'lga' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(FarmerStatus::class),
+            ],
+
+            'verification_status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(
+                    FarmerVerificationStatus::class
+                ),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'name',
+                    'farmer_code',
+                    'created_at',
+                    'listings_count',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'verification_status.enum' =>
+                'Verification status must be pending, verified, or rejected.',
+
+            'sort.in' =>
+                'Sort must be one of: name, farmer_code, created_at, listings_count.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\StoreFarmerRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class StoreFarmerRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'email' => [
+                'nullable',
+                'string',
+                'email',
+                'max:255',
+                'unique:farmers,email',
+            ],
+
+            'phone_number' => [
+                'required',
+                'string',
+                'max:20',
+            ],
+
+            'state' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'lga' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'gender' => [
+                'nullable',
+                'string',
+                'max:30',
+            ],
+
+            'date_of_birth' => [
+                'nullable',
+                'date',
+                'before_or_equal:today',
+            ],
+
+            'farm_name' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'farm_size_hectares' => [
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+
+            'farming_method' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'years_experience' => [
+                'nullable',
+                'integer',
+                'min:0',
+                'max:65535',
+            ],
+
+            'farm_address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'status' => [
+                'required',
+                Rule::enum(
+                    FarmerStatus::class
+                ),
+            ],
+
+            /*
+             * These are controlled by the backend.
+             */
+            'farmer_code' => [
+                'prohibited',
+            ],
+
+            'verification_status' => [
+                'prohibited',
+            ],
+
+            'verified_at' => [
+                'prohibited',
+            ],
+
+            'suspended_at' => [
+                'prohibited',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' =>
+                'Farmer name is required.',
+
+            'email.email' =>
+                'Email must be a valid email address.',
+
+            'email.unique' =>
+                'This email is already assigned to a farmer.',
+
+            'state.required' =>
+                'State is required.',
+
+            'lga.required' =>
+                'LGA is required.',
+
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'phone_number.required' =>
+                'Phone number is required.',
+
+            'date_of_birth.before_or_equal' =>
+                'Date of birth cannot be in the future.',
+
+            'farm_size_hectares.min' =>
+                'Farm size cannot be negative.',
+
+            'years_experience.min' =>
+                'Years of experience cannot be negative.',
+
+            'farmer_code.prohibited' =>
+                'Farmer code is generated by the server.',
+
+            'verification_status.prohibited' =>
+                'Verification status cannot be assigned through farmer creation.',
+        ];
+    }
+
+    public function attributes(): array
+    {
+        return [
+            'lga' =>
+                'LGA',
+
+            'phone_number' =>
+                'phone number',
+
+            'farm_size_hectares' =>
+                'farm size',
+
+            'years_experience' =>
+                'years of experience',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateFarmerRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateFarmerRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        /** @var \App\Models\Farmer $farmer */
+        $farmer = $this->route('farmer');
+
+        return [
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'email' => [
+                'nullable',
+                'string',
+                'email',
+                'max:255',
+
+                Rule::unique(
+                    'farmers',
+                    'email'
+                )->ignore($farmer),
+            ],
+
+            'phone_number' => [
+                'required',
+                'string',
+                'max:20',
+            ],
+
+            'state' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'lga' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'gender' => [
+                'nullable',
+                'string',
+                'max:30',
+            ],
+
+            'date_of_birth' => [
+                'nullable',
+                'date',
+                'before_or_equal:today',
+            ],
+
+            'farm_name' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'farm_size_hectares' => [
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+
+            'farming_method' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'years_experience' => [
+                'nullable',
+                'integer',
+                'min:0',
+                'max:65535',
+            ],
+
+            'farm_address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'status' => [
+                'required',
+                Rule::enum(
+                    FarmerStatus::class
+                ),
+            ],
+
+            'farmer_code' => [
+                'prohibited',
+            ],
+
+            'verification_status' => [
+                'prohibited',
+            ],
+
+            'verified_at' => [
+                'prohibited',
+            ],
+
+            'suspended_at' => [
+                'prohibited',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' =>
+                'Farmer name is required.',
+
+            'email.email' =>
+                'Email must be a valid email address.',
+
+            'email.unique' =>
+                'This email is already assigned to a farmer.',
+
+            'state.required' =>
+                'State is required.',
+
+            'lga.required' =>
+                'LGA is required.',
+
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'phone_number.required' =>
+                'Phone number is required.',
+
+            'date_of_birth.before_or_equal' =>
+                'Date of birth cannot be in the future.',
+
+            'farm_size_hectares.min' =>
+                'Farm size cannot be negative.',
+
+            'years_experience.min' =>
+                'Years of experience cannot be negative.',
+
+            'farmer_code.prohibited' =>
+                'Farmer code cannot be changed.',
+
+            'verification_status.prohibited' =>
+                'Use the farmer verification workflow to change verification status.',
+        ];
+    }
+
+    public function attributes(): array
+    {
+        return [
+            'lga' =>
+                'LGA',
+
+            'phone_number' =>
+                'phone number',
+
+            'farm_size_hectares' =>
+                'farm size',
+
+            'years_experience' =>
+                'years of experience',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateFarmerStatusRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateFarmerStatusRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'status' => [
+                'required',
+                Rule::enum(FarmerStatus::class),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateFarmerVerificationRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerVerificationStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateFarmerVerificationRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'verification_status' => [
+                'required',
+                Rule::enum(
+                    FarmerVerificationStatus::class
+                ),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'verification_status.required' =>
+                'Verification status is required.',
+
+            'verification_status.enum' =>
+                'Verification status must be pending, verified, or rejected.',
+        ];
+    }
+}
+
+=== Farmer migrations ===
+
+--- database/migrations/2026_06_10_100002_create_farmers_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('farmers', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('lga');
+            $table->string('status')->default('active');
+            $table->string('phone_number');
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('farmers');
+    }
+};
+
+--- database/migrations/2026_06_10_110000_add_state_to_farmers_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->string('state')->after('name');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->dropColumn('state');
+        });
+    }
+};
+
+--- database/migrations/2026_08_13_092212_add_profile_fields_to_farmers_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->string('farmer_code')
+                ->nullable()
+                ->unique()
+                ->after('id');
+
+            $table->string('email')
+                ->nullable()
+                ->unique()
+                ->after('name');
+
+            $table->text('address')
+                ->nullable()
+                ->after('phone_number');
+
+            $table->string('gender', 30)
+                ->nullable()
+                ->after('address');
+
+            $table->date('date_of_birth')
+                ->nullable()
+                ->after('gender');
+
+            $table->string('farm_name')
+                ->nullable()
+                ->after('date_of_birth');
+
+            $table->decimal(
+                'farm_size_hectares',
+                10,
+                2
+            )
+                ->nullable()
+                ->after('farm_name');
+
+            $table->string('farming_method')
+                ->nullable()
+                ->after('farm_size_hectares');
+
+            $table->unsignedSmallInteger(
+                'years_experience'
+            )
+                ->nullable()
+                ->after('farming_method');
+
+            $table->text('farm_address')
+                ->nullable()
+                ->after('years_experience');
+
+            $table->string(
+                'verification_status'
+            )
+                ->default('pending')
+                ->after('status');
+
+            $table->timestamp('verified_at')
+                ->nullable()
+                ->after('verification_status');
+
+            $table->timestamp('suspended_at')
+                ->nullable()
+                ->after('verified_at');
+        });
+
+        /*
+         * Existing farmers already have active marketplace
+         * data, so treat them as verified during the backfill.
+         *
+         * We do not invent a verified_at timestamp because
+         * the historical verification date is unknown.
+         */
+        DB::table('farmers')
+            ->select('id')
+            ->orderBy('id')
+            ->chunkById(
+                500,
+                function ($farmers): void {
+                    foreach ($farmers as $farmer) {
+                        DB::table('farmers')
+                            ->where(
+                                'id',
+                                $farmer->id
+                            )
+                            ->update([
+                                'farmer_code' =>
+                                    'FAR-'
+                                    .str_pad(
+                                        (string) $farmer->id,
+                                        6,
+                                        '0',
+                                        STR_PAD_LEFT
+                                    ),
+
+                                'verification_status' =>
+                                    'verified',
+                            ]);
+                    }
+                }
+            );
+    }
+
+    public function down(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->dropUnique([
+                'farmer_code',
+            ]);
+
+            $table->dropUnique([
+                'email',
+            ]);
+
+            $table->dropColumn([
+                'farmer_code',
+                'email',
+                'address',
+                'gender',
+                'date_of_birth',
+                'farm_name',
+                'farm_size_hectares',
+                'farming_method',
+                'years_experience',
+                'farm_address',
+                'verification_status',
+                'verified_at',
+                'suspended_at',
+            ]);
+        });
+    }
+};
+
+=== Listing eligibility-related tests ===
+
+Name                         FullName                                                                                  
+----                         --------                                                                                  
+FarmerIndexTest.php          C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Fa...
+FarmerListingIndexTest.php   C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Fa...
+FarmerOrderIndexTest.php     C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Fa...
+FarmerProfileTest.php        C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Fa...
+FarmerShowTest.php           C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Fa...
+FarmerStateTest.php          C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Fa...
+ListingIndexTest.php         C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Li...
+ListingTest.php              C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\Li...
+ListingImageTest.php         C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Listing\...
+ListingRichnessTest.php      C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Listing\...
+ListingUnitTest.php          C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Listing\...
+UserListingTest.php          C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Listing\...
+ListingCheckoutRulesTest.php C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Order\Li...
+
+
+

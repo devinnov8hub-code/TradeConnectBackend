@@ -31,13 +31,16 @@ use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 class Farmer extends Model
 {
     protected $attributes = [
-        'verification_status' => 'pending',
+        'verification_status' =>
+            'pending',
     ];
 
     protected static function booted(): void
     {
         static::created(
-            function (Farmer $farmer): void {
+            function (
+                Farmer $farmer
+            ): void {
                 /*
                  * Generate the public farmer code from the
                  * database ID so concurrent farmer creation
@@ -111,5 +114,18 @@ class Farmer extends Model
             Order::class,
             Listing::class
         );
+    }
+
+    /*
+     * A farmer must satisfy both operational state and
+     * identity verification before a marketplace listing
+     * can become live.
+     */
+    public function canPublishListings(): bool
+    {
+        return $this->status
+                === FarmerStatus::Active
+            && $this->verification_status
+                === FarmerVerificationStatus::Verified;
     }
 }

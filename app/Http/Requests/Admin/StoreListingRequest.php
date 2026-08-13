@@ -5,6 +5,7 @@ namespace App\Http\Requests\Admin;
 use App\Enums\ListingPublicationStatus;
 use App\Enums\ListingStatus;
 use App\Http\Requests\ApiFormRequest;
+use App\Models\Farmer;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
@@ -17,6 +18,7 @@ class StoreListingRequest extends ApiFormRequest
 
     public function rules(): array
     {
+        /** @var Farmer $farmer */
         $farmer =
             $this->route('farmer');
 
@@ -111,7 +113,7 @@ class StoreListingRequest extends ApiFormRequest
             ],
 
             /*
-             * Preferred new publication state.
+             * Preferred publication state.
              */
             'publication_status' => [
                 'sometimes',
@@ -189,42 +191,144 @@ class StoreListingRequest extends ApiFormRequest
                 Validator $validator
             ): void {
                 /*
-                 * An unrelated validation failure such as
-                 * label must not prevent us from reporting
-                 * pricing errors too.
-                 *
-                 * Only skip the custom pricing calculation
-                 * when one of its own inputs failed normal
-                 * validation.
+                 * Pricing validation is independent from
+                 * publication eligibility.
                  */
-                if (
+                $pricingHasErrors =
                     $validator
                         ->errors()
                         ->has('price')
                     || $validator
                         ->errors()
-                        ->has('original_price')
+                        ->has(
+                            'original_price'
+                        )
                     || $validator
                         ->errors()
-                        ->has('discount_percent')
-                ) {
-                    return;
+                        ->has(
+                            'discount_percent'
+                        );
+
+                if (! $pricingHasErrors) {
+                    $this->validatePricing(
+                        $validator,
+                        (float) $this->input(
+                            'price'
+                        ),
+                        $this->input(
+                            'original_price'
+                        ),
+                        $this->input(
+                            'discount_percent'
+                        )
+                    );
                 }
 
-                $this->validatePricing(
-                    $validator,
-                    (float) $this->input(
-                        'price'
-                    ),
-                    $this->input(
-                        'original_price'
-                    ),
-                    $this->input(
-                        'discount_percent'
-                    )
-                );
+                $this
+                    ->validatePublicationEligibility(
+                        $validator
+                    );
             }
         );
+    }
+
+    private function validatePublicationEligibility(
+        Validator $validator
+    ): void {
+        /*
+         * Leave malformed enum values to their normal
+         * Laravel validation rules.
+         */
+        if (
+            $validator
+                ->errors()
+                ->has(
+                    'publication_status'
+                )
+            || $validator
+                ->errors()
+                ->has('status')
+        ) {
+            return;
+        }
+
+        $targetStatus =
+            $this->targetPublicationStatus();
+
+        if (
+            $targetStatus
+            !== ListingPublicationStatus::Live
+        ) {
+            return;
+        }
+
+        /** @var Farmer $farmer */
+        $farmer =
+            $this->route('farmer');
+
+        if (
+            $farmer
+                ->canPublishListings()
+        ) {
+            return;
+        }
+
+        /*
+         * Attach the error to whichever API contract
+         * attempted to publish the listing.
+         */
+        $field =
+            $this->has(
+                'publication_status'
+            )
+                ? 'publication_status'
+                : 'status';
+
+        $validator
+            ->errors()
+            ->add(
+                $field,
+                'Listing cannot be published because the farmer must be active and verified.'
+            );
+    }
+
+    private function targetPublicationStatus():
+        ListingPublicationStatus
+    {
+        /*
+         * New publication state wins when both new and
+         * legacy fields are supplied.
+         */
+        if (
+            $this->has(
+                'publication_status'
+            )
+        ) {
+            return ListingPublicationStatus::from(
+                (string) $this->input(
+                    'publication_status'
+                )
+            );
+        }
+
+        if ($this->has('status')) {
+            $legacyStatus =
+                ListingStatus::from(
+                    (string) $this->input(
+                        'status'
+                    )
+                );
+
+            return $legacyStatus
+                === ListingStatus::Active
+                    ? ListingPublicationStatus::Live
+                    : ListingPublicationStatus::Inactive;
+        }
+
+        /*
+         * New listings default to pending.
+         */
+        return ListingPublicationStatus::Pending;
     }
 
     private function validatePricing(

@@ -363,6 +363,9 @@ class ListingTest extends TestCase
             'status' =>
                 FarmerStatus::Active,
 
+            'verification_status' => 
+                'verified',
+
             'phone_number' =>
                 '08012345678',
         ]);
