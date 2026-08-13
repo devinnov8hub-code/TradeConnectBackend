@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests\Auth;
 
+use App\Enums\UserRole;
 use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Password;
 
 class RegisterRequest extends ApiFormRequest
@@ -15,7 +17,12 @@ class RegisterRequest extends ApiFormRequest
     public function rules(): array
     {
         return [
-            'name' => ['required', 'string', 'max:255'],
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
             'email' => [
                 'required',
                 'string',
@@ -23,23 +30,45 @@ class RegisterRequest extends ApiFormRequest
                 'max:255',
                 'unique:users,email',
             ],
+
             'password' => [
                 'required',
                 'string',
                 'confirmed',
                 Password::defaults(),
             ],
-            'role' => ['prohibited'],
+
+            /*
+             * PoC behavior:
+             *
+             * Allow the person registering to choose
+             * between the available application roles,
+             * including admin.
+             *
+             * This should be locked down again before
+             * production deployment.
+             */
+            'role' => [
+                'required',
+                Rule::enum(UserRole::class),
+            ],
         ];
     }
 
     public function messages(): array
     {
         return [
-            'email.unique' => 'This email is already registered.',
-            'password.confirmed' => 'Password confirmation does not match.',
-            'role.prohibited' => 'Role cannot be assigned through public registration.',
+            'email.unique' =>
+                'This email is already registered.',
+
+            'password.confirmed' =>
+                'Password confirmation does not match.',
+
+            'role.required' =>
+                'A role is required.',
+
+            'role.enum' =>
+                'The selected role is invalid.',
         ];
     }
 }
-
