@@ -261,6 +261,14 @@ Route::prefix('v1')->group(function () {
                 [BuyerController::class, 'index']
             );
 
+            Route::patch(
+                'buyers/{buyer}/status',
+                [
+                    BuyerController::class,
+                    'updateStatus',
+                ]
+            );
+
             Route::get(
                 'buyers/{buyer}',
                 [BuyerController::class, 'show']
