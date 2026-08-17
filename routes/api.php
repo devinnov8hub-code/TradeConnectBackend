@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\V1\Admin\ActivityController;
 use App\Http\Controllers\Api\V1\Admin\BuyerController;
 use App\Http\Controllers\Api\V1\Admin\CategoryController;
 use App\Http\Controllers\Api\V1\Admin\DashboardController;
+use App\Http\Controllers\Api\V1\Admin\DashboardRevenueController;
 use App\Http\Controllers\Api\V1\Admin\DisputeController as AdminDisputeController;
 use App\Http\Controllers\Api\V1\Admin\FarmerController;
 use App\Http\Controllers\Api\V1\Admin\ListingController as AdminListingController;
@@ -158,6 +159,11 @@ Route::prefix('v1')->group(function () {
             Route::get(
                 'dashboard',
                 DashboardController::class
+            );
+
+            Route::get(
+                'dashboard/revenue',
+                DashboardRevenueController::class
             );
 
             Route::get(
