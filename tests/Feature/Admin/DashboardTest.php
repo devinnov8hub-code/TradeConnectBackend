@@ -15,6 +15,7 @@ use App\Models\Listing;
 use App\Models\Order;
 use App\Models\Produce;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -22,8 +23,19 @@ class DashboardTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
+
     public function test_admin_can_view_expanded_dashboard_summary(): void
     {
+        Carbon::setTestNow(
+            '2026-08-17 09:00:00'
+        );
+
         $admin =
             User::factory()->create([
                 'role' =>
@@ -72,9 +84,6 @@ class DashboardTest extends TestCase
             ])
             ->saveQuietly();
 
-        /*
-         * One active farmer awaiting verification.
-         */
         $pendingFarmer =
             Farmer::create([
                 'name' =>
@@ -96,9 +105,6 @@ class DashboardTest extends TestCase
                     '08011111111',
             ]);
 
-        /*
-         * This farmer is verified but inactive.
-         */
         Farmer::create([
             'name' =>
                 'Inactive Farmer',
@@ -162,9 +168,6 @@ class DashboardTest extends TestCase
                     'image/jpeg',
             ]);
 
-        /*
-         * One pending listing.
-         */
         $pendingListing =
             Listing::create([
                 'farmer_id' =>
@@ -189,13 +192,6 @@ class DashboardTest extends TestCase
                     ListingPublicationStatus::Pending,
             ]);
 
-        /*
-         * One live listing.
-         *
-         * Direct model creation is intentional here: the
-         * dashboard test is exercising aggregation rather
-         * than the publication eligibility endpoint.
-         */
         $liveListing =
             Listing::create([
                 'farmer_id' =>
@@ -221,7 +217,8 @@ class DashboardTest extends TestCase
             ]);
 
         /*
-         * One order placed today.
+         * One order placed today. It also belongs in the
+         * action queue because its status is new.
          */
         Order::create([
             'user_id' =>
@@ -256,8 +253,10 @@ class DashboardTest extends TestCase
         ]);
 
         /*
-         * One historical order that must increase total
-         * orders without increasing orders_today.
+         * Historical terminal order.
+         *
+         * It increases total_orders but must not appear in
+         * the action queue.
          */
         Order::create([
             'user_id' =>
@@ -343,6 +342,233 @@ class DashboardTest extends TestCase
             ->assertJsonPath(
                 'data.new_buyers_this_week',
                 2
+            )
+            ->assertJsonPath(
+                'data.order_action_queue_count',
+                1
+            )
+            ->assertJsonCount(
+                1,
+                'data.order_action_queue'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.order_number',
+                'ORD-DASH-000001'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.status',
+                'new'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.action.key',
+                'process_order'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.action.next_status',
+                'in_transit'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.action.can_cancel',
+                true
+            );
+    }
+
+    public function test_action_queue_contains_only_non_terminal_orders_and_prioritises_new_orders(): void
+    {
+        Carbon::setTestNow(
+            '2026-08-17 10:00:00'
+        );
+
+        $admin =
+            User::factory()->create([
+                'role' =>
+                    UserRole::Admin,
+            ]);
+
+        $buyer =
+            User::factory()->create([
+                'role' =>
+                    UserRole::User,
+            ]);
+
+        $farmer =
+            $this->createVerifiedFarmer();
+
+        $listing =
+            $this->createListing(
+                $farmer,
+                'Beans'
+            );
+
+        /*
+         * Older in-transit order.
+         */
+        $inTransit =
+            $this->createOrder(
+                $buyer,
+                $listing,
+                'ORD-QUEUE-000001',
+                OrderStatus::InTransit,
+                PaymentStatus::Paid,
+                now()->subHours(3)
+            );
+
+        /*
+         * Newer new order.
+         *
+         * New orders are intentionally presented ahead of
+         * in-transit orders because they have not yet entered
+         * fulfillment.
+         */
+        $new =
+            $this->createOrder(
+                $buyer,
+                $listing,
+                'ORD-QUEUE-000002',
+                OrderStatus::New,
+                PaymentStatus::Paid,
+                now()->subHour()
+            );
+
+        $this->createOrder(
+            $buyer,
+            $listing,
+            'ORD-QUEUE-000003',
+            OrderStatus::Delivered,
+            PaymentStatus::Paid,
+            now()->subHours(4)
+        );
+
+        $this->createOrder(
+            $buyer,
+            $listing,
+            'ORD-QUEUE-000004',
+            OrderStatus::Cancelled,
+            PaymentStatus::Pending,
+            now()->subHours(5)
+        );
+
+        $token =
+            auth('api')->login(
+                $admin
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/dashboard'
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.order_action_queue_count',
+                2
+            )
+            ->assertJsonCount(
+                2,
+                'data.order_action_queue'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.id',
+                $new->id
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.action.key',
+                'process_order'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.action.next_status',
+                'in_transit'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.0.action.can_cancel',
+                false
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.1.id',
+                $inTransit->id
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.1.action.key',
+                'complete_delivery'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.1.action.next_status',
+                'delivered'
+            )
+            ->assertJsonPath(
+                'data.order_action_queue.1.action.can_cancel',
+                false
+            );
+    }
+
+    public function test_action_queue_is_limited_to_five_orders(): void
+    {
+        Carbon::setTestNow(
+            '2026-08-17 11:00:00'
+        );
+
+        $admin =
+            User::factory()->create([
+                'role' =>
+                    UserRole::Admin,
+            ]);
+
+        $buyer =
+            User::factory()->create([
+                'role' =>
+                    UserRole::User,
+            ]);
+
+        $farmer =
+            $this->createVerifiedFarmer();
+
+        $listing =
+            $this->createListing(
+                $farmer,
+                'Sorghum'
+            );
+
+        foreach (
+            range(1, 7)
+            as $index
+        ) {
+            $this->createOrder(
+                $buyer,
+                $listing,
+                'ORD-LIMIT-'
+                    .str_pad(
+                        (string)
+                            $index,
+                        6,
+                        '0',
+                        STR_PAD_LEFT
+                    ),
+                OrderStatus::New,
+                PaymentStatus::Pending,
+                now()->subMinutes(
+                    10 - $index
+                )
+            );
+        }
+
+        $token =
+            auth('api')->login(
+                $admin
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/dashboard'
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.order_action_queue_count',
+                7
+            )
+            ->assertJsonCount(
+                5,
+                'data.order_action_queue'
             );
     }
 
@@ -361,80 +587,15 @@ class DashboardTest extends TestCase
             ]);
 
         $farmer =
-            Farmer::create([
-                'name' =>
-                    'Legacy Farmer',
-
-                'state' =>
-                    'Niger',
-
-                'lga' =>
-                    'Bida',
-
-                'status' =>
-                    FarmerStatus::Active,
-
-                'verification_status' =>
-                    FarmerVerificationStatus::Verified,
-
-                'verified_at' =>
-                    now(),
-
-                'phone_number' =>
-                    '08033333333',
-            ]);
-
-        $category =
-            Category::create([
-                'name' =>
-                    'Vegetables',
-            ]);
-
-        $produce =
-            Produce::create([
-                'category_id' =>
-                    $category->id,
-
-                'name' =>
-                    'Tomato',
-
-                'image' =>
-                    base64_encode(
-                        'tomato'
-                    ),
-
-                'image_mime' =>
-                    'image/jpeg',
-            ]);
+            $this->createVerifiedFarmer();
 
         $listing =
-            Listing::create([
-                'farmer_id' =>
-                    $farmer->id,
+            $this->createListing(
+                $farmer,
+                'Tomato',
+                'Vegetables'
+            );
 
-                'produce_id' =>
-                    $produce->id,
-
-                'price' =>
-                    '15000.00',
-
-                'unit' =>
-                    'basket',
-
-                'stock' =>
-                    15,
-
-                'minimum_order_quantity' =>
-                    1,
-
-                'publication_status' =>
-                    ListingPublicationStatus::Live,
-            ]);
-
-        /*
-         * Simulates a legacy record created before
-         * placed_at became part of the order contract.
-         */
         Order::create([
             'user_id' =>
                 $buyer->id,
@@ -507,5 +668,154 @@ class DashboardTest extends TestCase
                 '/api/v1/admin/dashboard'
             )
             ->assertForbidden();
+    }
+
+    private function createVerifiedFarmer(): Farmer
+    {
+        return Farmer::create([
+            'name' =>
+                'Verified Farmer',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'verified_at' =>
+                now(),
+
+            'phone_number' =>
+                fake()
+                    ->unique()
+                    ->numerify(
+                        '080########'
+                    ),
+        ]);
+    }
+
+    private function createListing(
+        Farmer $farmer,
+        string $produceName,
+        string $categoryName = 'Grains'
+    ): Listing {
+        $category =
+            Category::firstOrCreate([
+                'name' =>
+                    $categoryName,
+            ]);
+
+        $produce =
+            Produce::create([
+                'category_id' =>
+                    $category->id,
+
+                'name' =>
+                    $produceName,
+
+                'image' =>
+                    base64_encode(
+                        strtolower(
+                            $produceName
+                        )
+                    ),
+
+                'image_mime' =>
+                    'image/jpeg',
+            ]);
+
+        return Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                '15000.00',
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                50,
+
+            'minimum_order_quantity' =>
+                1,
+
+            'publication_status' =>
+                ListingPublicationStatus::Live,
+        ]);
+    }
+
+    private function createOrder(
+        User $buyer,
+        Listing $listing,
+        string $orderNumber,
+        OrderStatus $status,
+        PaymentStatus $paymentStatus,
+        Carbon $placedAt
+    ): Order {
+        return Order::create([
+            'user_id' =>
+                $buyer->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'quantity' =>
+                1,
+
+            'order_number' =>
+                $orderNumber,
+
+            'subtotal' =>
+                '15000.00',
+
+            'delivery_fee' =>
+                '0.00',
+
+            'total' =>
+                '15000.00',
+
+            'status' =>
+                $status,
+
+            'payment_status' =>
+                $paymentStatus,
+
+            'placed_at' =>
+                $placedAt,
+
+            'out_for_delivery_at' =>
+                $status
+                === OrderStatus::InTransit
+                    ? $placedAt
+                    : null,
+
+            'delivered_at' =>
+                $status
+                === OrderStatus::Delivered
+                    ? $placedAt
+                    : null,
+
+            'cancelled_at' =>
+                $status
+                === OrderStatus::Cancelled
+                    ? $placedAt
+                    : null,
+
+            'paid_at' =>
+                $paymentStatus
+                === PaymentStatus::Paid
+                    ? $placedAt
+                    : null,
+        ]);
     }
 }
