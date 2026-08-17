@@ -337,7 +337,12 @@ class DashboardController extends Controller
                  * dashboard response.
                  */
                 'active_users' =>
-                    $activeBuyers,
+                    User::query()
+                        ->where(
+                            'role',
+                            UserRole::User
+                        )
+                        ->count(),
 
                 'new_buyers_this_week' =>
                     $newBuyersThisWeek,

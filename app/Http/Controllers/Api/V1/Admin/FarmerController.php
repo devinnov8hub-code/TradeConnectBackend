@@ -17,6 +17,7 @@ use App\Http\Requests\Admin\UpdateFarmerVerificationRequest;
 use App\Http\Resources\FarmerOrderSummaryResource;
 use App\Http\Resources\FarmerResource;
 use App\Http\Resources\ListingResource;
+use App\Http\Resources\OrderResource;
 use App\Models\Farmer;
 use App\Models\Order;
 use App\Models\OrderItem;
@@ -189,19 +190,18 @@ class FarmerController extends Controller
         Farmer $farmer
     ): JsonResponse {
         /*
-         * Keep the existing listings_count field
-         * available through FarmerResource.
+         * Preserve the original v1 farmer-detail contract
+         * while keeping the richer summary fields additive.
+         *
+         * Original keys such as listings, orders, orders_count,
+         * and total_earned retain their legacy meaning.
+         * Enhanced UI previews live under recent_listings and
+         * recent_orders.
          */
         $farmer->loadCount(
             'listings'
         );
 
-        /*
-         * Publication-state counts.
-         *
-         * Use publication_status rather than the
-         * temporary legacy status field.
-         */
         $listingStatusCounts =
             $farmer
                 ->listings()
@@ -217,21 +217,46 @@ class FarmerController extends Controller
                 );
 
         /*
-         * Parent-order query scoped through this
-         * farmer's order_items.
+         * Enhanced farmer-scoped order query.
          *
-         * whereHas means a multi-farmer parent order
-         * is counted once for this farmer.
+         * Modern orders are associated through order_items.
+         * Legacy orders that have no order_items yet are included
+         * through their original listing relationship.
          */
         $farmerOrderQuery =
             Order::query()
-                ->whereHas(
-                    'items',
-                    fn (Builder $query) =>
-                        $query->where(
-                            'farmer_id',
-                            $farmer->id
-                        )
+                ->where(
+                    function (
+                        Builder $query
+                    ) use ($farmer): void {
+                        $query
+                            ->whereHas(
+                                'items',
+                                fn (Builder $itemQuery) =>
+                                    $itemQuery->where(
+                                        'farmer_id',
+                                        $farmer->id
+                                    )
+                            )
+                            ->orWhere(
+                                function (
+                                    Builder $legacyOrderQuery
+                                ) use ($farmer): void {
+                                    $legacyOrderQuery
+                                        ->whereDoesntHave(
+                                            'items'
+                                        )
+                                        ->whereHas(
+                                            'listing',
+                                            fn (Builder $listingQuery) =>
+                                                $listingQuery->where(
+                                                    'farmer_id',
+                                                    $farmer->id
+                                                )
+                                        );
+                                }
+                            );
+                    }
                 );
 
         $orderStatusCounts =
@@ -247,8 +272,8 @@ class FarmerController extends Controller
                     'status'
                 );
 
-        $ordersCount =
-            $orderStatusCounts
+        $enhancedOrdersCount =
+            (int) $orderStatusCounts
                 ->sum();
 
         $completedOrdersCount =
@@ -270,12 +295,12 @@ class FarmerController extends Controller
                 ->count();
 
         /*
-         * Earnings remain line-item scoped.
+         * Preferred paid earnings metric for the enhanced UI.
          *
-         * Never use parent order.total here because
-         * the checkout may contain other farmers.
+         * Modern order-item revenue is farmer-scoped so a parent
+         * order containing other farmers is never over-counted.
          */
-        $totalEarned =
+        $paidItemEarnings =
             OrderItem::query()
                 ->where(
                     'farmer_id',
@@ -295,12 +320,99 @@ class FarmerController extends Controller
                 );
 
         /*
-         * Farmer detail is now a preview endpoint,
-         * not an unlimited history endpoint.
+         * A legacy paid order may not yet have order_items.
+         * Include those parent totals only when no items exist.
+         */
+        $legacyPaidEarnings =
+            Order::query()
+                ->whereDoesntHave(
+                    'items'
+                )
+                ->whereHas(
+                    'listing',
+                    fn (Builder $query) =>
+                        $query->where(
+                            'farmer_id',
+                            $farmer->id
+                        )
+                )
+                ->where(
+                    'payment_status',
+                    PaymentStatus::Paid
+                        ->value
+                )
+                ->sum(
+                    'total'
+                );
+
+        $paidTotalEarned =
+            bcadd(
+                (string) $paidItemEarnings,
+                (string) $legacyPaidEarnings,
+                2
+            );
+
+        /*
+         * Original v1 collections and earnings semantics.
          *
-         * Full paginated histories already exist at
-         * /farmers/{farmer}/listings and
-         * /farmers/{farmer}/orders.
+         * The original endpoint returned every listing and every
+         * order linked through orders.listing_id. total_earned was
+         * the sum of non-cancelled parent-order totals, regardless
+         * of payment status. Keep those exact meanings on the old
+         * top-level keys for backwards compatibility.
+         */
+        $legacyListings =
+            $farmer
+                ->listings()
+                ->with([
+                    'produce.category',
+                    'farmer',
+                ])
+                ->orderByDesc(
+                    'created_at'
+                )
+                ->orderByDesc(
+                    'id'
+                )
+                ->get();
+
+        $legacyOrders =
+            $farmer
+                ->orders()
+                ->with([
+                    'listing.produce.category',
+                    'listing.farmer',
+                    'items.produce.category',
+                    'items.farmer',
+                ])
+                ->orderByDesc(
+                    'created_at'
+                )
+                ->orderByDesc(
+                    'id'
+                )
+                ->get();
+
+        $legacyOrdersCount =
+            $legacyOrders
+                ->count();
+
+        $legacyTotalEarned =
+            $legacyOrders
+                ->reject(
+                    fn (Order $order) =>
+                        $order->status
+                        === OrderStatus::Cancelled
+                )
+                ->sum(
+                    fn (Order $order) =>
+                        (float) $order->total
+                );
+
+        /*
+         * Enhanced profile previews remain available under new,
+         * additive keys so they no longer change the meaning of
+         * the original listings/orders arrays.
          */
         $recentListings =
             $farmer
@@ -312,19 +424,14 @@ class FarmerController extends Controller
                 ->orderByDesc(
                     'created_at'
                 )
-                ->orderByDesc('id')
+                ->orderByDesc(
+                    'id'
+                )
                 ->limit(
                     self::PROFILE_PREVIEW_LIMIT
                 )
                 ->get();
 
-        /*
-         * Eager-load ONLY this farmer's items.
-         *
-         * FarmerOrderSummaryResource can therefore
-         * calculate farmer_total safely on a
-         * multi-farmer order.
-         */
         $recentOrders =
             (clone $farmerOrderQuery)
                 ->with([
@@ -348,7 +455,9 @@ class FarmerController extends Controller
                 ->orderByDesc(
                     'created_at'
                 )
-                ->orderByDesc('id')
+                ->orderByDesc(
+                    'id'
+                )
                 ->limit(
                     self::PROFILE_PREVIEW_LIMIT
                 )
@@ -362,9 +471,17 @@ class FarmerController extends Controller
             request()
         );
 
-        $formattedTotalEarned =
+        $formattedLegacyTotalEarned =
             number_format(
-                (float) $totalEarned,
+                (float) $legacyTotalEarned,
+                2,
+                '.',
+                ''
+            );
+
+        $formattedPaidTotalEarned =
+            number_format(
+                (float) $paidTotalEarned,
                 2,
                 '.',
                 ''
@@ -375,20 +492,20 @@ class FarmerController extends Controller
                 ...$profile,
 
                 /*
-                 * Existing compatibility fields.
+                 * Original v1 compatibility fields.
                  */
                 'orders_count' =>
-                    (int) $ordersCount,
+                    $legacyOrdersCount,
 
                 'completed_orders_count' =>
                     $completedOrdersCount,
 
                 'total_earned' =>
-                    $formattedTotalEarned,
+                    $formattedLegacyTotalEarned,
 
                 /*
-                 * Preferred structured summary for
-                 * the farmer profile UI.
+                 * Preferred structured summary for the enhanced
+                 * farmer profile UI.
                  */
                 'summary' => [
                     'listings' => [
@@ -430,7 +547,7 @@ class FarmerController extends Controller
 
                     'orders' => [
                         'total' =>
-                            (int) $ordersCount,
+                            $enhancedOrdersCount,
 
                         'new' =>
                             (int) (
@@ -471,24 +588,35 @@ class FarmerController extends Controller
                             $paidOrdersCount,
 
                         'total_earned' =>
-                            $formattedTotalEarned,
+                            $formattedPaidTotalEarned,
                     ],
                 ],
 
-                /*
-                 * These arrays are intentionally previews.
-                 * Use the dedicated paginated endpoints
-                 * for complete histories.
-                 */
                 'preview_limit' =>
                     self::PROFILE_PREVIEW_LIMIT,
 
+                /*
+                 * Original complete collections.
+                 */
                 'listings' =>
+                    ListingResource::collection(
+                        $legacyListings
+                    ),
+
+                'orders' =>
+                    OrderResource::collection(
+                        $legacyOrders
+                    ),
+
+                /*
+                 * Enhanced bounded previews.
+                 */
+                'recent_listings' =>
                     ListingResource::collection(
                         $recentListings
                     ),
 
-                'orders' =>
+                'recent_orders' =>
                     FarmerOrderSummaryResource::collection(
                         $recentOrders
                     ),

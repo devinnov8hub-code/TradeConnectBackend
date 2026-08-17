@@ -198,7 +198,7 @@ class FarmerActivitySummaryTest extends TestCase
 
             ->assertJsonPath(
                 'data.total_earned',
-                '30000.00'
+                '60000.00'
             )
 
             ->assertJsonPath(
@@ -341,8 +341,8 @@ class FarmerActivitySummaryTest extends TestCase
             ->assertOk()
 
             /*
-             * Six exist, but only five are embedded
-             * in the profile preview.
+             * Original arrays remain complete, while the
+             * enhanced recent_* arrays are bounded previews.
              */
             ->assertJsonPath(
                 'data.summary.listings.total',
@@ -350,8 +350,13 @@ class FarmerActivitySummaryTest extends TestCase
             )
 
             ->assertJsonCount(
-                5,
+                6,
                 'data.listings'
+            )
+
+            ->assertJsonCount(
+                5,
+                'data.recent_listings'
             )
 
             ->assertJsonPath(
@@ -360,8 +365,13 @@ class FarmerActivitySummaryTest extends TestCase
             )
 
             ->assertJsonCount(
-                5,
+                6,
                 'data.orders'
+            )
+
+            ->assertJsonCount(
+                5,
+                'data.recent_orders'
             )
 
             /*
@@ -369,12 +379,12 @@ class FarmerActivitySummaryTest extends TestCase
              * checkout.
              */
             ->assertJsonPath(
-                'data.orders.0.id',
+                'data.recent_orders.0.id',
                 $multiFarmerOrder->id
             )
 
             ->assertJsonPath(
-                'data.orders.0.parent_order_total',
+                'data.recent_orders.0.parent_order_total',
                 '100000.00'
             )
 
@@ -383,18 +393,18 @@ class FarmerActivitySummaryTest extends TestCase
              * own 60,000 line.
              */
             ->assertJsonPath(
-                'data.orders.0.farmer_total',
+                'data.recent_orders.0.farmer_total',
                 '60000.00'
             )
 
             ->assertJsonPath(
-                'data.orders.0.farmer_items_count',
+                'data.recent_orders.0.farmer_items_count',
                 1
             )
 
             ->assertJsonCount(
                 1,
-                'data.orders.0.items'
+                'data.recent_orders.0.items'
             );
     }
 

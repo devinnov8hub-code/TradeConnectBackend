@@ -13,6 +13,33 @@ class IndexDisputeRequest extends ApiFormRequest
         return true;
     }
 
+    /**
+     * Keep accepting the enhanced alias "under_review"
+     * without mutating the actual query string.
+     *
+     * Pagination links therefore retain whatever the client
+     * sent, while validated() returns the canonical v1 value
+     * "open" used by the database.
+     *
+     * @return array<string, mixed>
+     */
+    public function validationData(): array
+    {
+        $data =
+            parent::validationData();
+
+        if (
+            ($data['status'] ?? null)
+            === 'under_review'
+        ) {
+            $data['status'] =
+                DisputeStatus::UnderReview
+                    ->value;
+        }
+
+        return $data;
+    }
+
     public function rules(): array
     {
         return [
@@ -26,6 +53,7 @@ class IndexDisputeRequest extends ApiFormRequest
             'status' => [
                 'sometimes',
                 'nullable',
+
                 Rule::enum(
                     DisputeStatus::class
                 ),
@@ -83,7 +111,7 @@ class IndexDisputeRequest extends ApiFormRequest
     {
         return [
             'status.enum' =>
-                'Status must be under_review, resolved, or closed.',
+                'Status must be open, under_review, resolved, or closed.',
 
             'unread.boolean' =>
                 'Unread must be true or false.',

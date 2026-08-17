@@ -236,7 +236,7 @@ class ListingTest extends TestCase
         );
     }
 
-    public function test_unit_is_required_when_creating_listing(): void
+    public function test_unit_cannot_exceed_fifty_characters(): void
     {
         $token = $this->adminToken();
 
@@ -257,6 +257,12 @@ class ListingTest extends TestCase
 
                     'price' =>
                         45000,
+
+                    'unit' =>
+                        str_repeat(
+                            'x',
+                            51
+                        ),
 
                     'stock' =>
                         120,
@@ -363,7 +369,7 @@ class ListingTest extends TestCase
             'status' =>
                 FarmerStatus::Active,
 
-            'verification_status' => 
+            'verification_status' =>
                 'verified',
 
             'phone_number' =>

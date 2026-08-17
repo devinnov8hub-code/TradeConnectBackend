@@ -467,7 +467,7 @@ class FarmerProfileTest extends TestCase
             )
             ->assertJsonPath(
                 'data.total_earned',
-                '10000.00'
+                '15000.00'
             );
     }
 

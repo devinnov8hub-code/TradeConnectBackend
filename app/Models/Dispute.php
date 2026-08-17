@@ -19,10 +19,10 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 ])]
 class Dispute extends Model
 {
-    protected $attributes = [
-        'status' =>
-            'under_review',
-    ];
+   protected $attributes = [
+    'status' =>
+        'open',
+];
 
     protected static function booted(): void
     {

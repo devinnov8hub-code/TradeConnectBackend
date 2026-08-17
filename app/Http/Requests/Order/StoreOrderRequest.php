@@ -12,6 +12,98 @@ use Illuminate\Validation\Validator;
 
 class StoreOrderRequest extends ApiFormRequest
 {
+    private bool $legacySingleItemPayload = false;
+
+    protected function prepareForValidation(): void
+    {
+        $input = $this->all();
+
+        $hasItems = array_key_exists(
+            'items',
+            $input
+        );
+
+        $hasLegacyListing = array_key_exists(
+            'listing_id',
+            $input
+        );
+
+        $hasLegacyQuantity = array_key_exists(
+            'quantity',
+            $input
+        );
+
+        /*
+         * Original v1 checkout contract:
+         *
+         * {
+         *     "listing_id": 1,
+         *     "quantity": 2
+         * }
+         *
+         * Keep accepting that request shape, but normalise it
+         * into items[] so the application still uses the modern
+         * parent-order + order-items architecture internally.
+         *
+         * If items[] is already present, this compatibility path
+         * does not run. A request that mixes modern and legacy
+         * checkout fields therefore remains invalid.
+         */
+        if (
+            ! $hasItems
+            && (
+                $hasLegacyListing
+                || $hasLegacyQuantity
+            )
+        ) {
+            $this->legacySingleItemPayload = true;
+
+            $input['items'] = [
+                [
+                    'listing_id' =>
+                        $input['listing_id']
+                        ?? null,
+
+                    'quantity' =>
+                        $input['quantity']
+                        ?? null,
+                ],
+            ];
+
+            /*
+             * Delivery fields did not exist in the original
+             * order-creation contract. The additive order
+             * migration made these columns nullable, so do not
+             * invent delivery history for legacy requests.
+             *
+             * Explicit delivery values supplied by a legacy
+             * caller are still validated and stored.
+             */
+            foreach (
+                [
+                    'delivery_method',
+                    'delivery_name',
+                    'delivery_phone',
+                    'delivery_state',
+                    'delivery_lga',
+                    'delivery_address',
+                    'delivery_notes',
+                ] as $field
+            ) {
+                if (
+                    ! array_key_exists(
+                        $field,
+                        $input
+                    )
+                ) {
+                    $input[$field] = null;
+                }
+            }
+
+            $this->replace($input);
+        }
+    }
+
     public function authorize(): bool
     {
         return true;
@@ -19,7 +111,65 @@ class StoreOrderRequest extends ApiFormRequest
 
     public function rules(): array
     {
+        $deliveryPresenceRule =
+            $this->legacySingleItemPayload
+                ? 'nullable'
+                : 'required';
+
+        $legacyListingRules =
+            $this->legacySingleItemPayload
+                ? [
+                    'required',
+                    'integer',
+                    'exists:listings,id',
+                ]
+                : [
+                    'prohibited',
+                ];
+
+        $legacyQuantityRules =
+            $this->legacySingleItemPayload
+                ? [
+                    'required',
+                    'integer',
+                    'min:1',
+                ]
+                : [
+                    'prohibited',
+                ];
+
+        $itemListingRules =
+            $this->legacySingleItemPayload
+                ? []
+                : [
+                    'required',
+                    'integer',
+                    'distinct',
+                    'exists:listings,id',
+                ];
+
+        $itemQuantityRules =
+            $this->legacySingleItemPayload
+                ? []
+                : [
+                    'required',
+                    'integer',
+                    'min:1',
+                ];
+
         return [
+            /*
+             * Original single-item request fields.
+             *
+             * They are accepted only when items[] was absent and
+             * prepareForValidation() identified a legacy request.
+             */
+            'listing_id' =>
+                $legacyListingRules,
+
+            'quantity' =>
+                $legacyQuantityRules,
+
             'items' => [
                 'required',
                 'array',
@@ -27,55 +177,49 @@ class StoreOrderRequest extends ApiFormRequest
                 'max:50',
             ],
 
-            'items.*.listing_id' => [
-                'required',
-                'integer',
-                'distinct',
-                'exists:listings,id',
-            ],
+            'items.*.listing_id' =>
+                $itemListingRules,
 
-            'items.*.quantity' => [
-                'required',
-                'integer',
-                'min:1',
-            ],
+            'items.*.quantity' =>
+                $itemQuantityRules,
 
             /*
-             * Checkout delivery information.
+             * Modern checkout requires a complete delivery
+             * snapshot. Legacy checkout may omit it.
              */
             'delivery_method' => [
-                'required',
+                $deliveryPresenceRule,
                 Rule::enum(
                     DeliveryMethod::class
                 ),
             ],
 
             'delivery_name' => [
-                'required',
+                $deliveryPresenceRule,
                 'string',
                 'max:255',
             ],
 
             'delivery_phone' => [
-                'required',
+                $deliveryPresenceRule,
                 'string',
                 'max:30',
             ],
 
             'delivery_state' => [
-                'required',
+                $deliveryPresenceRule,
                 'string',
                 'max:100',
             ],
 
             'delivery_lga' => [
-                'required',
+                $deliveryPresenceRule,
                 'string',
                 'max:100',
             ],
 
             'delivery_address' => [
-                'required',
+                $deliveryPresenceRule,
                 'string',
                 'max:1000',
             ],
@@ -89,14 +233,6 @@ class StoreOrderRequest extends ApiFormRequest
             /*
              * Server-owned order values.
              */
-            'listing_id' => [
-                'prohibited',
-            ],
-
-            'quantity' => [
-                'prohibited',
-            ],
-
             'subtotal' => [
                 'prohibited',
             ],
@@ -134,6 +270,24 @@ class StoreOrderRequest extends ApiFormRequest
     public function messages(): array
     {
         return [
+            /*
+             * Original v1 validation messages.
+             */
+            'listing_id.required' =>
+                'Listing is required.',
+
+            'listing_id.exists' =>
+                'Listing not found.',
+
+            'quantity.required' =>
+                'Quantity is required.',
+
+            'quantity.min' =>
+                'Quantity must be at least 1.',
+
+            /*
+             * Modern items[] validation messages.
+             */
             'items.required' =>
                 'At least one order item is required.',
 
@@ -222,12 +376,31 @@ class StoreOrderRequest extends ApiFormRequest
                 Validator $validator
             ): void {
                 /*
-                 * Do not perform database-dependent
-                 * validation if the item structure itself
-                 * is already invalid.
+                 * Preserve original validation-field names for
+                 * the old listing_id / quantity contract.
                  */
                 if (
-                    $validator
+                    $this->legacySingleItemPayload
+                    && (
+                        $validator
+                            ->errors()
+                            ->has('listing_id')
+                        || $validator
+                            ->errors()
+                            ->has('quantity')
+                    )
+                ) {
+                    return;
+                }
+
+                /*
+                 * Do not perform database-dependent
+                 * validation if the modern item structure
+                 * itself is invalid.
+                 */
+                if (
+                    ! $this->legacySingleItemPayload
+                    && $validator
                         ->errors()
                         ->has('items')
                 ) {
@@ -242,8 +415,8 @@ class StoreOrderRequest extends ApiFormRequest
                 );
 
                 /*
-                 * Individual wildcard validation errors
-                 * can leave an item incomplete.
+                 * Individual wildcard validation errors can
+                 * leave a modern item incomplete.
                  */
                 if (
                     $items->contains(
@@ -303,10 +476,19 @@ class StoreOrderRequest extends ApiFormRequest
                             'quantity'
                         ];
 
+                    $listingErrorKey =
+                        $this->legacySingleItemPayload
+                            ? 'listing_id'
+                            : "items.{$index}.listing_id";
+
+                    $quantityErrorKey =
+                        $this->legacySingleItemPayload
+                            ? 'quantity'
+                            : "items.{$index}.quantity";
+
                     /*
-                     * Both states are checked while the
-                     * legacy status field remains in the
-                     * application.
+                     * Both publication_status and legacy
+                     * status continue to protect checkout.
                      */
                     if (
                         $listing
@@ -318,7 +500,7 @@ class StoreOrderRequest extends ApiFormRequest
                         $validator
                             ->errors()
                             ->add(
-                                "items.{$index}.listing_id",
+                                $listingErrorKey,
                                 'This listing is not available.'
                             );
 
@@ -343,7 +525,7 @@ class StoreOrderRequest extends ApiFormRequest
                         $validator
                             ->errors()
                             ->add(
-                                "items.{$index}.listing_id",
+                                $listingErrorKey,
                                 'This listing is not available for ordering yet.'
                             );
 
@@ -366,7 +548,7 @@ class StoreOrderRequest extends ApiFormRequest
                         $validator
                             ->errors()
                             ->add(
-                                "items.{$index}.quantity",
+                                $quantityErrorKey,
                                 "Minimum order quantity for this listing is {$minimumQuantity}."
                             );
                     }
@@ -378,7 +560,7 @@ class StoreOrderRequest extends ApiFormRequest
                         $validator
                             ->errors()
                             ->add(
-                                "items.{$index}.quantity",
+                                $quantityErrorKey,
                                 'Insufficient stock for this listing.'
                             );
                     }

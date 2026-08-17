@@ -11,6 +11,43 @@ use Illuminate\Validation\Validator;
 
 class StoreListingRequest extends ApiFormRequest
 {
+    /*
+     * The original v1 listing contract did not contain
+     * unit or publication_status.
+     *
+     * Example:
+     *
+     * {
+     *     "produce_id": 1,
+     *     "price": 45000,
+     *     "stock": 120,
+     *     "status": "active"
+     * }
+     *
+     * We keep recognising that payload during the
+     * compatibility period.
+     */
+    private bool $legacyOriginalPayload = false;
+
+    protected function prepareForValidation(): void
+    {
+        $input = $this->all();
+
+        $this->legacyOriginalPayload =
+            ! array_key_exists(
+                'unit',
+                $input
+            )
+            && ! array_key_exists(
+                'publication_status',
+                $input
+            )
+            && array_key_exists(
+                'status',
+                $input
+            );
+    }
+
     public function authorize(): bool
     {
         return true;
@@ -20,7 +57,9 @@ class StoreListingRequest extends ApiFormRequest
     {
         /** @var Farmer $farmer */
         $farmer =
-            $this->route('farmer');
+            $this->route(
+                'farmer'
+            );
 
         return [
             'produce_id' => [
@@ -56,8 +95,19 @@ class StoreListingRequest extends ApiFormRequest
                 'max:100',
             ],
 
+            /*
+             * unit was added after the original v1 API.
+             *
+             * Keep it optional at the v1 boundary so old
+             * clients continue to work. New clients should
+             * still send it whenever it is known.
+             *
+             * The database column is nullable, so we do not
+             * fabricate a unit such as kg or bag.
+             */
             'unit' => [
-                'required',
+                'sometimes',
+                'nullable',
                 'string',
                 'max:50',
             ],
@@ -103,7 +153,7 @@ class StoreListingRequest extends ApiFormRequest
             ],
 
             /*
-             * Legacy client compatibility.
+             * Original v1 state field.
              */
             'status' => [
                 'sometimes',
@@ -113,7 +163,7 @@ class StoreListingRequest extends ApiFormRequest
             ],
 
             /*
-             * Preferred publication state.
+             * Preferred enhanced publication-state field.
              */
             'publication_status' => [
                 'sometimes',
@@ -151,9 +201,6 @@ class StoreListingRequest extends ApiFormRequest
             'discount_percent.max' =>
                 'Discount percent cannot exceed 100.',
 
-            'unit.required' =>
-                'Unit is required.',
-
             'unit.max' =>
                 'Unit cannot exceed 50 characters.',
 
@@ -190,14 +237,12 @@ class StoreListingRequest extends ApiFormRequest
             function (
                 Validator $validator
             ): void {
-                /*
-                 * Pricing validation is independent from
-                 * publication eligibility.
-                 */
                 $pricingHasErrors =
                     $validator
                         ->errors()
-                        ->has('price')
+                        ->has(
+                            'price'
+                        )
                     || $validator
                         ->errors()
                         ->has(
@@ -209,19 +254,22 @@ class StoreListingRequest extends ApiFormRequest
                             'discount_percent'
                         );
 
-                if (! $pricingHasErrors) {
-                    $this->validatePricing(
-                        $validator,
-                        (float) $this->input(
-                            'price'
-                        ),
-                        $this->input(
-                            'original_price'
-                        ),
-                        $this->input(
-                            'discount_percent'
-                        )
-                    );
+                if (
+                    ! $pricingHasErrors
+                ) {
+                    $this
+                        ->validatePricing(
+                            $validator,
+                            (float) $this->input(
+                                'price'
+                            ),
+                            $this->input(
+                                'original_price'
+                            ),
+                            $this->input(
+                                'discount_percent'
+                            )
+                        );
                 }
 
                 $this
@@ -236,9 +284,19 @@ class StoreListingRequest extends ApiFormRequest
         Validator $validator
     ): void {
         /*
-         * Leave malformed enum values to their normal
-         * Laravel validation rules.
+         * Original v1 callers predate farmer verification.
+         *
+         * Their original status-based request remains valid.
+         * Modern requests containing unit and/or
+         * publication_status continue to use the enhanced
+         * publication eligibility workflow.
          */
+        if (
+            $this->legacyOriginalPayload
+        ) {
+            return;
+        }
+
         if (
             $validator
                 ->errors()
@@ -247,13 +305,16 @@ class StoreListingRequest extends ApiFormRequest
                 )
             || $validator
                 ->errors()
-                ->has('status')
+                ->has(
+                    'status'
+                )
         ) {
             return;
         }
 
         $targetStatus =
-            $this->targetPublicationStatus();
+            $this
+                ->targetPublicationStatus();
 
         if (
             $targetStatus
@@ -264,7 +325,9 @@ class StoreListingRequest extends ApiFormRequest
 
         /** @var Farmer $farmer */
         $farmer =
-            $this->route('farmer');
+            $this->route(
+                'farmer'
+            );
 
         if (
             $farmer
@@ -273,10 +336,6 @@ class StoreListingRequest extends ApiFormRequest
             return;
         }
 
-        /*
-         * Attach the error to whichever API contract
-         * attempted to publish the listing.
-         */
         $field =
             $this->has(
                 'publication_status'
@@ -295,10 +354,6 @@ class StoreListingRequest extends ApiFormRequest
     private function targetPublicationStatus():
         ListingPublicationStatus
     {
-        /*
-         * New publication state wins when both new and
-         * legacy fields are supplied.
-         */
         if (
             $this->has(
                 'publication_status'
@@ -311,7 +366,11 @@ class StoreListingRequest extends ApiFormRequest
             );
         }
 
-        if ($this->has('status')) {
+        if (
+            $this->has(
+                'status'
+            )
+        ) {
             $legacyStatus =
                 ListingStatus::from(
                     (string) $this->input(
@@ -325,9 +384,6 @@ class StoreListingRequest extends ApiFormRequest
                     : ListingPublicationStatus::Inactive;
         }
 
-        /*
-         * New listings default to pending.
-         */
         return ListingPublicationStatus::Pending;
     }
 
@@ -341,7 +397,8 @@ class StoreListingRequest extends ApiFormRequest
             $originalPrice === null
         ) {
             if (
-                $discountPercent !== null
+                $discountPercent
+                !== null
             ) {
                 $validator
                     ->errors()
@@ -358,7 +415,8 @@ class StoreListingRequest extends ApiFormRequest
             (float) $originalPrice;
 
         if (
-            $originalPrice < $price
+            $originalPrice
+            < $price
         ) {
             $validator
                 ->errors()
@@ -371,7 +429,8 @@ class StoreListingRequest extends ApiFormRequest
         }
 
         if (
-            $discountPercent === null
+            $discountPercent
+            === null
         ) {
             return;
         }

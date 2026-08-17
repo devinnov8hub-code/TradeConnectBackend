@@ -337,7 +337,7 @@ class DashboardTest extends TestCase
             )
             ->assertJsonPath(
                 'data.active_users',
-                2
+                3
             )
             ->assertJsonPath(
                 'data.new_buyers_this_week',

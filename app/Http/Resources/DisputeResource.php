@@ -20,11 +20,18 @@ class DisputeResource extends JsonResource
             null;
 
         /*
-         * Preserve legacy single-item detail only when
-         * we KNOW the order has no modern order_items.
+         * Preserve the original order.produce projection for
+         * genuine single-item orders.
          *
-         * Never use orders.listing_id to infer a farmer
-         * for a modern multi-item dispute.
+         * The order-items migration backfilled old single-item
+         * orders with one OrderItem while deliberately keeping
+         * orders.listing_id. Those migrated orders are still
+         * legacy single-item orders and should therefore keep
+         * order.produce.
+         *
+         * Modern multi-item orders continue to omit this legacy
+         * projection so we never pretend one product represents
+         * the whole order.
          */
         if (
             $this->relationLoaded(
@@ -36,10 +43,6 @@ class DisputeResource extends JsonResource
                 ->relationLoaded(
                     'items'
                 )
-            && $this
-                ->order
-                ->items
-                ->isEmpty()
             && $this
                 ->order
                 ->relationLoaded(
@@ -59,11 +62,32 @@ class DisputeResource extends JsonResource
                 ->listing
                 ->produce
         ) {
-            $legacyProduce =
+            $items =
                 $this
                     ->order
-                    ->listing
-                    ->produce;
+                    ->items;
+
+            $isLegacySingleItem =
+                $items->isEmpty()
+                || (
+                    $items->count() === 1
+                    && (int) $items
+                        ->first()
+                        ->listing_id
+                        === (int) $this
+                            ->order
+                            ->listing_id
+                );
+
+            if (
+                $isLegacySingleItem
+            ) {
+                $legacyProduce =
+                    $this
+                        ->order
+                        ->listing
+                        ->produce;
+            }
         }
 
         return [
@@ -82,14 +106,25 @@ class DisputeResource extends JsonResource
             'subject' =>
                 $this->subject,
 
+            /*
+             * Canonical v1 field stays backward-compatible.
+             *
+             * Under-review disputes therefore expose "open"
+             * here, matching the original API.
+             */
             'status' =>
                 $this
                     ->status
                     ->value,
 
             /*
-             * Viewer-specific projection.
+             * Additive enhanced workflow value for the newer UI.
              */
+            'workflow_status' =>
+                $this
+                    ->status
+                    ->workflowValue(),
+
             'unread_count' =>
                 $unreadCount,
 
@@ -126,12 +161,6 @@ class DisputeResource extends JsonResource
                     ]
                 ),
 
-            /*
-             * This is the ONLY farmer attribution for
-             * an item-specific dispute.
-             *
-             * An order-wide dispute returns null.
-             */
             'affected_farmer' =>
                 $this->when(
                     $this->relationLoaded(
@@ -216,9 +245,6 @@ class DisputeResource extends JsonResource
                                 ->order
                                 ->order_number,
 
-                        /*
-                         * Legacy compatibility.
-                         */
                         'quantity' =>
                             $this
                                 ->order
@@ -257,8 +283,11 @@ class DisputeResource extends JsonResource
                             ),
 
                         /*
-                         * Legacy single-item compatibility
-                         * only. Omitted for modern orders.
+                         * Original single-item projection.
+                         *
+                         * Kept for truly single-item orders,
+                         * including migrated legacy orders that
+                         * now have exactly one order_items row.
                          */
                         'produce' =>
                             $this->when(
@@ -281,9 +310,6 @@ class DisputeResource extends JsonResource
                     ]
                 ),
 
-            /*
-             * Efficient list projection.
-             */
             'last_message' =>
                 $this->when(
                     $this->relationLoaded(
@@ -311,9 +337,6 @@ class DisputeResource extends JsonResource
                     'messages'
                 ),
 
-            /*
-             * Workflow / audit projection.
-             */
             'under_review_at' =>
                 $this
                     ->under_review_at,
