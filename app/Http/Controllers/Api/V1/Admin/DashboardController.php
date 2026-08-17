@@ -14,6 +14,7 @@ use App\Models\Farmer;
 use App\Models\Listing;
 use App\Models\Order;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 
@@ -21,60 +22,161 @@ class DashboardController extends Controller
 {
     public function __invoke(): JsonResponse
     {
+        $now =
+            now();
+
         $startOfToday =
-            now()->startOfDay();
+            $now
+                ->copy()
+                ->startOfDay();
 
         $endOfToday =
-            now()->endOfDay();
+            $now
+                ->copy()
+                ->endOfDay();
 
         $startOfWeek =
-            now()->startOfWeek();
+            $now
+                ->copy()
+                ->startOfWeek();
+
+        /*
+         * Dashboard comparison period.
+         *
+         * Compare the current month-to-date against the
+         * equivalent portion of the previous month.
+         *
+         * Example:
+         *
+         * Aug 1 - Aug 17
+         * compared with
+         * Jul 1 - Jul 17
+         *
+         * This avoids comparing a partial current month
+         * against an entire previous month.
+         */
+        $currentPeriodStart =
+            $now
+                ->copy()
+                ->startOfMonth()
+                ->startOfDay();
+
+        $currentPeriodEnd =
+            $now->copy();
+
+        $previousPeriodEnd =
+            $now
+                ->copy()
+                ->subMonthNoOverflow();
+
+        $previousPeriodStart =
+            $previousPeriodEnd
+                ->copy()
+                ->startOfMonth()
+                ->startOfDay();
 
         /*
          * Prefer placed_at for modern orders.
          *
-         * Older orders may not have placed_at, so their
-         * created_at timestamp remains the compatibility
-         * fallback for the "orders today" metric.
+         * Older orders may not have placed_at, so created_at
+         * remains the compatibility fallback.
          */
         $ordersToday =
-            Order::query()
+            $this->countOrdersBetween(
+                $startOfToday,
+                $endOfToday
+            );
+
+        /*
+         * Period comparison source counts.
+         *
+         * These percentages describe new activity during the
+         * period rather than attempting to reconstruct a
+         * historical snapshot of active/inactive state.
+         */
+        $currentOrders =
+            $this->countOrdersBetween(
+                $currentPeriodStart,
+                $currentPeriodEnd
+            );
+
+        $previousOrders =
+            $this->countOrdersBetween(
+                $previousPeriodStart,
+                $previousPeriodEnd
+            );
+
+        $currentListings =
+            Listing::query()
+                ->whereBetween(
+                    'created_at',
+                    [
+                        $currentPeriodStart,
+                        $currentPeriodEnd,
+                    ]
+                )
+                ->count();
+
+        $previousListings =
+            Listing::query()
+                ->whereBetween(
+                    'created_at',
+                    [
+                        $previousPeriodStart,
+                        $previousPeriodEnd,
+                    ]
+                )
+                ->count();
+
+        $currentFarmers =
+            Farmer::query()
+                ->whereBetween(
+                    'created_at',
+                    [
+                        $currentPeriodStart,
+                        $currentPeriodEnd,
+                    ]
+                )
+                ->count();
+
+        $previousFarmers =
+            Farmer::query()
+                ->whereBetween(
+                    'created_at',
+                    [
+                        $previousPeriodStart,
+                        $previousPeriodEnd,
+                    ]
+                )
+                ->count();
+
+        $currentBuyers =
+            User::query()
                 ->where(
-                    function (
-                        Builder $query
-                    ) use (
-                        $startOfToday,
-                        $endOfToday
-                    ): void {
-                        $query
-                            ->whereBetween(
-                                'placed_at',
-                                [
-                                    $startOfToday,
-                                    $endOfToday,
-                                ]
-                            )
-                            ->orWhere(
-                                function (
-                                    Builder $legacyQuery
-                                ) use (
-                                    $startOfToday,
-                                    $endOfToday
-                                ): void {
-                                    $legacyQuery
-                                        ->whereNull(
-                                            'placed_at'
-                                        )
-                                        ->whereBetween(
-                                            'created_at',
-                                            [
-                                                $startOfToday,
-                                                $endOfToday,
-                                            ]
-                                        );
-                                }
-                            );
-                    }
+                    'role',
+                    UserRole::User
+                )
+                ->whereBetween(
+                    'created_at',
+                    [
+                        $currentPeriodStart,
+                        $currentPeriodEnd,
+                    ]
+                )
+                ->count();
+
+        $previousBuyers =
+            User::query()
+                ->where(
+                    'role',
+                    UserRole::User
+                )
+                ->whereBetween(
+                    'created_at',
+                    [
+                        $previousPeriodStart,
+                        $previousPeriodEnd,
+                    ]
                 )
                 ->count();
 
@@ -117,8 +219,7 @@ class DashboardController extends Controller
          *
          * New orders are prioritised ahead of orders already
          * in transit. Within each status, older orders come
-         * first so long-waiting work naturally rises to the
-         * top of the admin queue.
+         * first.
          */
         $actionQueueOrders =
             Order::query()
@@ -172,12 +273,24 @@ class DashboardController extends Controller
                     Order::query()
                         ->count(),
 
+                'orders_change_percent' =>
+                    $this->changePercent(
+                        $currentOrders,
+                        $previousOrders
+                    ),
+
                 'orders_today' =>
                     $ordersToday,
 
                 'total_listings' =>
                     Listing::query()
                         ->count(),
+
+                'listings_change_percent' =>
+                    $this->changePercent(
+                        $currentListings,
+                        $previousListings
+                    ),
 
                 'pending_listings' =>
                     Listing::query()
@@ -195,6 +308,12 @@ class DashboardController extends Controller
                         )
                         ->count(),
 
+                'farmers_change_percent' =>
+                    $this->changePercent(
+                        $currentFarmers,
+                        $previousFarmers
+                    ),
+
                 'pending_farmer_verifications' =>
                     Farmer::query()
                         ->where(
@@ -206,6 +325,12 @@ class DashboardController extends Controller
                 'active_buyers' =>
                     $activeBuyers,
 
+                'buyers_change_percent' =>
+                    $this->changePercent(
+                        $currentBuyers,
+                        $previousBuyers
+                    ),
+
                 /*
                  * Compatibility key retained for existing
                  * frontend code consuming the original
@@ -216,6 +341,35 @@ class DashboardController extends Controller
 
                 'new_buyers_this_week' =>
                     $newBuyersThisWeek,
+
+                /*
+                 * Make the meaning of the percentages
+                 * explicit for frontend integration.
+                 */
+                'comparison' => [
+                    'basis' =>
+                        'month_to_date_vs_previous_month_to_date',
+
+                    'current_period' => [
+                        'start' =>
+                            $currentPeriodStart
+                                ->toISOString(),
+
+                        'end' =>
+                            $currentPeriodEnd
+                                ->toISOString(),
+                    ],
+
+                    'previous_period' => [
+                        'start' =>
+                            $previousPeriodStart
+                                ->toISOString(),
+
+                        'end' =>
+                            $previousPeriodEnd
+                                ->toISOString(),
+                    ],
+                ],
 
                 'order_action_queue' =>
                     $actionQueueOrders,
@@ -232,6 +386,83 @@ class DashboardController extends Controller
                         ->count(),
             ],
         ]);
+    }
+
+    private function countOrdersBetween(
+        Carbon $start,
+        Carbon $end
+    ): int {
+        return Order::query()
+            ->where(
+                function (
+                    Builder $query
+                ) use (
+                    $start,
+                    $end
+                ): void {
+                    $query
+                        ->whereBetween(
+                            'placed_at',
+                            [
+                                $start,
+                                $end,
+                            ]
+                        )
+                        ->orWhere(
+                            function (
+                                Builder $legacyQuery
+                            ) use (
+                                $start,
+                                $end
+                            ): void {
+                                $legacyQuery
+                                    ->whereNull(
+                                        'placed_at'
+                                    )
+                                    ->whereBetween(
+                                        'created_at',
+                                        [
+                                            $start,
+                                            $end,
+                                        ]
+                                    );
+                            }
+                        );
+                }
+            )
+            ->count();
+    }
+
+    private function changePercent(
+        int $current,
+        int $previous
+    ): ?float {
+        /*
+         * Percentage growth from zero is mathematically
+         * undefined.
+         *
+         * If both periods contain zero activity, return 0.
+         * If only the previous period is zero, return null so
+         * the frontend can show "New" or another appropriate
+         * representation instead of an invented percentage.
+         */
+        if ($previous === 0) {
+            return $current === 0
+                ? 0.0
+                : null;
+        }
+
+        return round(
+            (
+                (
+                    $current
+                    - $previous
+                )
+                / $previous
+            )
+            * 100,
+            2
+        );
     }
 
     private function actionQueueItem(
@@ -371,10 +602,6 @@ class DashboardController extends Controller
                 'next_status' =>
                     $nextStatus?->value,
 
-                /*
-                 * Existing cancellation policy:
-                 * only new unpaid orders are cancellable.
-                 */
                 'can_cancel' =>
                     $order
                         ->isCancellable(),
