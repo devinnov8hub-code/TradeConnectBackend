@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\V1\Admin\ActivityController;
 use App\Http\Controllers\Api\V1\Admin\BuyerController;
 use App\Http\Controllers\Api\V1\Admin\CategoryController;
 use App\Http\Controllers\Api\V1\Admin\DashboardController;
@@ -157,6 +158,11 @@ Route::prefix('v1')->group(function () {
             Route::get(
                 'dashboard',
                 DashboardController::class
+            );
+
+            Route::get(
+                'activities',
+                ActivityController::class
             );
 
             Route::apiResource(
