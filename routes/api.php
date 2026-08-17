@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\V1\Admin\DisputeController as AdminDisputeControlle
 use App\Http\Controllers\Api\V1\Admin\FarmerController;
 use App\Http\Controllers\Api\V1\Admin\ListingController as AdminListingController;
 use App\Http\Controllers\Api\V1\Admin\ListingImageController as AdminListingImageController;
+use App\Http\Controllers\Api\V1\Admin\NotificationController;
 use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
 use App\Http\Controllers\Api\V1\Admin\ProduceController;
 use App\Http\Controllers\Api\V1\Admin\UserController;
@@ -169,6 +170,33 @@ Route::prefix('v1')->group(function () {
             Route::get(
                 'activities',
                 ActivityController::class
+            );
+
+            /*
+             * Admin notifications.
+             */
+            Route::get(
+                'notifications',
+                [
+                    NotificationController::class,
+                    'index',
+                ]
+            );
+
+            Route::patch(
+                'notifications/read-all',
+                [
+                    NotificationController::class,
+                    'markAllRead',
+                ]
+            );
+
+            Route::patch(
+                'notifications/{notification}/read',
+                [
+                    NotificationController::class,
+                    'markRead',
+                ]
             );
 
             Route::apiResource(
