@@ -8,6 +8,9 @@ use App\Http\Requests\Admin\UpdateProduceRequest;
 use App\Models\Produce;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
+use RuntimeException;
+use Throwable;
 
 class ProduceController extends Controller
 {
@@ -22,11 +25,22 @@ class ProduceController extends Controller
 
     public function store(StoreProduceRequest $request): JsonResponse
     {
-        $produce = Produce::create([
-            'category_id' => $request->validated('category_id'),
-            'name' => $request->validated('name'),
-            ...$this->encodeImage($request->file('image')),
-        ]);
+        $file = $request->file('image');
+        $path = $this->storeImage($file);
+
+        try {
+            $produce = Produce::create([
+                'category_id' => $request->validated('category_id'),
+                'name' => $request->validated('name'),
+                'image' => null,
+                'image_path' => $path,
+                'image_mime' => $file->getMimeType(),
+            ]);
+        } catch (Throwable $exception) {
+            Storage::disk('public')->delete($path);
+
+            throw $exception;
+        }
 
         return response()->json(['data' => $produce], 201);
     }
@@ -39,12 +53,31 @@ class ProduceController extends Controller
     public function update(UpdateProduceRequest $request, Produce $produce): JsonResponse
     {
         $data = $request->safe()->only(['category_id', 'name']);
+        $newPath = null;
+        $oldPath = $produce->image_path;
 
         if ($request->hasFile('image')) {
-            $data = [...$data, ...$this->encodeImage($request->file('image'))];
+            $file = $request->file('image');
+            $newPath = $this->storeImage($file);
+
+            $data['image'] = null;
+            $data['image_path'] = $newPath;
+            $data['image_mime'] = $file->getMimeType();
         }
 
-        $produce->update($data);
+        try {
+            $produce->update($data);
+        } catch (Throwable $exception) {
+            if ($newPath) {
+                Storage::disk('public')->delete($newPath);
+            }
+
+            throw $exception;
+        }
+
+        if ($newPath && $oldPath && $oldPath !== $newPath) {
+            Storage::disk('public')->delete($oldPath);
+        }
 
         return response()->json(['data' => $produce->fresh()]);
     }
@@ -56,14 +89,14 @@ class ProduceController extends Controller
         return response()->json(['message' => 'Produce deleted.']);
     }
 
-    /**
-     * @return array{image: string, image_mime: string}
-     */
-    private function encodeImage(UploadedFile $file): array
+    private function storeImage(UploadedFile $file): string
     {
-        return [
-            'image' => base64_encode(file_get_contents($file->getRealPath())),
-            'image_mime' => $file->getMimeType(),
-        ];
+        $path = $file->store('produce-images', 'public');
+
+        if (! is_string($path) || $path === '') {
+            throw new RuntimeException('Unable to store produce image.');
+        }
+
+        return $path;
     }
 }

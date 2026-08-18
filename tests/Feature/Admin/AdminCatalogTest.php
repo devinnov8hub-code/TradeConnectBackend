@@ -10,6 +10,7 @@ use App\Models\Produce;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class AdminCatalogTest extends TestCase
@@ -49,6 +50,8 @@ class AdminCatalogTest extends TestCase
 
     public function test_admin_can_add_produce_to_category(): void
     {
+        Storage::fake('public');
+
         $token = $this->adminToken();
         $category = Category::create(['name' => 'Grains']);
 
@@ -61,11 +64,23 @@ class AdminCatalogTest extends TestCase
         $response->assertCreated()
             ->assertJsonPath('data.name', 'Rice')
             ->assertJsonPath('data.category_id', $category->id)
+            ->assertJsonPath('data.image', null)
             ->assertJsonPath('data.image_mime', 'image/jpeg')
-            ->assertJsonStructure(['data' => ['image', 'image_mime', 'image_url']]);
+            ->assertJsonStructure(['data' => ['image', 'image_path', 'image_mime', 'image_url']]);
 
-        $this->assertNotEmpty($response->json('data.image'));
-        $this->assertStringStartsWith('data:image/jpeg;base64,', $response->json('data.image_url'));
+        $path = $response->json('data.image_path');
+
+        $this->assertIsString($path);
+        $this->assertStringStartsWith('produce-images/', $path);
+        $this->assertSame(Storage::disk('public')->url($path), $response->json('data.image_url'));
+        Storage::disk('public')->assertExists($path);
+
+        $this->assertDatabaseHas('produce', [
+            'id' => $response->json('data.id'),
+            'image' => null,
+            'image_path' => $path,
+            'image_mime' => 'image/jpeg',
+        ]);
     }
 
     public function test_produce_image_is_required(): void
