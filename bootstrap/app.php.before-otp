@@ -12,49 +12,6 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\UnauthorizedHttpException;
 
-if (! function_exists('apiResourceNotFoundMessage')) {
-    function apiResourceNotFoundMessage(Request $request): ?string
-    {
-        if (preg_match('#api/v1/admin/listings/\d+#', $request->path())) {
-            return 'Listing not found.';
-        }
-
-        if (preg_match('#api/v1/admin/farmers(?:/|$)#', $request->path())) {
-            return 'Farmer not found.';
-        }
-
-        if (preg_match('#api/v1/admin/categories(?:/|$)#', $request->path())) {
-            return 'Category not found.';
-        }
-
-        if (preg_match('#api/v1/admin/produce(?:/|$)#', $request->path())) {
-            return 'Produce not found.';
-        }
-
-        if (preg_match('#api/v1/orders(?:/|$)#', $request->path())) {
-            return 'Order not found.';
-        }
-
-        if (preg_match('#api/v1/admin/orders(?:/|$)#', $request->path())) {
-            return 'Order not found.';
-        }
-
-        if (preg_match('#api/v1/admin/users(?:/|$)#', $request->path())) {
-            return 'User not found.';
-        }
-
-        if (preg_match('#api/v1/admin/buyers(?:/|$)#', $request->path())) {
-            return 'Buyer not found.';
-        }
-
-        if (preg_match('#api/v1/(?:admin/)?disputes(?:/|$)#', $request->path())) {
-            return 'Dispute not found.';
-        }
-
-        return null;
-    }
-}
-
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
         web: __DIR__.'/../routes/web.php',
@@ -147,3 +104,46 @@ return Application::configure(basePath: dirname(__DIR__))
             return response()->json(['message' => $message], 404);
         });
     })->create();
+
+if (! function_exists('apiResourceNotFoundMessage')) {
+    function apiResourceNotFoundMessage(Request $request): ?string
+    {
+        if (preg_match('#api/v1/admin/listings/\d+#', $request->path())) {
+            return 'Listing not found.';
+        }
+
+        if (preg_match('#api/v1/admin/farmers(?:/|$)#', $request->path())) {
+            return 'Farmer not found.';
+        }
+
+        if (preg_match('#api/v1/admin/categories(?:/|$)#', $request->path())) {
+            return 'Category not found.';
+        }
+
+        if (preg_match('#api/v1/admin/produce(?:/|$)#', $request->path())) {
+            return 'Produce not found.';
+        }
+
+        if (preg_match('#api/v1/orders(?:/|$)#', $request->path())) {
+            return 'Order not found.';
+        }
+
+        if (preg_match('#api/v1/admin/orders(?:/|$)#', $request->path())) {
+            return 'Order not found.';
+        }
+
+        if (preg_match('#api/v1/admin/users(?:/|$)#', $request->path())) {
+            return 'User not found.';
+        }
+
+        if (preg_match('#api/v1/admin/buyers(?:/|$)#', $request->path())) {
+            return 'Buyer not found.';
+        }
+
+        if (preg_match('#api/v1/(?:admin/)?disputes(?:/|$)#', $request->path())) {
+            return 'Dispute not found.';
+        }
+
+        return null;
+    }
+}

@@ -14,7 +14,6 @@ use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
 use App\Http\Controllers\Api\V1\Admin\ProduceController;
 use App\Http\Controllers\Api\V1\Admin\UserController;
 use App\Http\Controllers\Api\V1\AuthController;
-use App\Http\Controllers\Api\V1\AuthOtpController;
 use App\Http\Controllers\Api\V1\DisputeController;
 use App\Http\Controllers\Api\V1\ListingController;
 use App\Http\Controllers\Api\V1\OrderController;
@@ -40,37 +39,6 @@ Route::prefix('v1')->group(function () {
         [AuthController::class, 'login']
     );
 
-    /*
-     * Password recovery: issue OTP, verify OTP, then consume
-     * the short-lived reset token.
-     */
-    Route::middleware('throttle:6,1')
-        ->group(function () {
-            Route::post(
-                'password/forgot',
-                [
-                    AuthOtpController::class,
-                    'forgotPassword',
-                ]
-            );
-
-            Route::post(
-                'password/verify-code',
-                [
-                    AuthOtpController::class,
-                    'verifyPasswordCode',
-                ]
-            );
-
-            Route::post(
-                'password/reset',
-                [
-                    AuthOtpController::class,
-                    'resetPassword',
-                ]
-            );
-        });
-
     Route::get(
         'listings',
         [ListingController::class, 'index']
@@ -90,33 +58,6 @@ Route::prefix('v1')->group(function () {
                 'me',
                 [AuthController::class, 'me']
             );
-
-            Route::middleware('throttle:3,1')
-                ->group(function () {
-                    Route::post(
-                        'email/verification/send',
-                        [
-                            AuthOtpController::class,
-                            'sendEmailVerification',
-                        ]
-                    );
-
-                    Route::post(
-                        'email/verification/resend',
-                        [
-                            AuthOtpController::class,
-                            'sendEmailVerification',
-                        ]
-                    );
-
-                    Route::post(
-                        'email/verification/verify',
-                        [
-                            AuthOtpController::class,
-                            'verifyEmail',
-                        ]
-                    );
-                });
 
             Route::get(
                 'orders',
