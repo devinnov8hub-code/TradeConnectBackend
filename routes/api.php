@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\V1\Admin\ListingImageController as AdminListingImag
 use App\Http\Controllers\Api\V1\Admin\NotificationController;
 use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
 use App\Http\Controllers\Api\V1\Admin\ProduceController;
+use App\Http\Controllers\Api\V1\MarketplaceSummaryController;
 use App\Http\Controllers\Api\V1\Admin\UserController;
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\AuthOtpController;
@@ -34,6 +35,11 @@ Route::prefix('v1')->group(function () {
         '/register',
         [AuthController::class, 'register']
     );
+
+    Route::get(
+    'marketplace/summary',
+    MarketplaceSummaryController::class
+);
 
     Route::post(
         '/login',
