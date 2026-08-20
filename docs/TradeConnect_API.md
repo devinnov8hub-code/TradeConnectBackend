@@ -399,7 +399,17 @@ Returns categories ordered by name, including lightweight nested produce records
 GET /api/v1/marketplace/summary
 ```
 
-Counts only marketplace-visible listings belonging to active, verified farmers.
+Returns aggregate statistics for the public marketplace.
+
+This endpoint does **not** return the actual listing records.
+
+Use:
+
+- `GET /api/v1/marketplace/summary` for the total visible listings, farmers, and LGAs.
+- `GET /api/v1/listings` for the actual marketplace listings.
+- `GET /api/v1/listings/{listing}` for one listing's details.
+
+Only marketplace-visible listings belonging to active, verified farmers are included in the summary.
 
 **Response `200`**
 
@@ -414,7 +424,6 @@ Counts only marketplace-visible listings belonging to active, verified farmers.
 ```
 
 ---
-
 ## Browse Public Listings
 
 ```http
