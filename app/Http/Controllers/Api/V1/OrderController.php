@@ -2,13 +2,16 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\ListingPublicationStatus;
 use App\Enums\ListingStatus;
 use App\Enums\OrderStatus;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Order\IndexOrderRequest;
 use App\Http\Requests\Order\StoreOrderRequest;
 use App\Http\Resources\OrderResource;
 use App\Models\Listing;
 use App\Models\Order;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -16,93 +19,726 @@ use Illuminate\Validation\ValidationException;
 
 class OrderController extends Controller
 {
-    public function index(Request $request): JsonResponse
-    {
-        $orders = $request->user()
-            ->orders()
-            ->with(['listing.produce.category'])
-            ->orderByDesc('created_at')
-            ->get();
+    public function index(
+        IndexOrderRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
 
-        return response()->json([
-            'data' => OrderResource::collection($orders),
-        ]);
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $orders = $request
+            ->user()
+            ->orders()
+            ->with([
+                'items.produce.category',
+                'items.farmer',
+
+                // Legacy compatibility.
+                'listing.produce.category',
+                'listing.farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated(
+                            'search'
+                        )
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'orders.order_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'items',
+                                    function (
+                                        Builder $itemQuery
+                                    ) use ($search): void {
+                                        $itemQuery->where(
+                                            function (
+                                                Builder $query
+                                            ) use ($search): void {
+                                                $query
+                                                    ->where(
+                                                        'produce_name',
+                                                        'like',
+                                                        $search
+                                                    )
+                                                    ->orWhere(
+                                                        'category_name',
+                                                        'like',
+                                                        $search
+                                                    );
+                                            }
+                                        );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'listing.produce',
+                                    function (
+                                        Builder $produceQuery
+                                    ) use ($search): void {
+                                        $produceQuery->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        );
+                                    }
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'payment_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'orders.payment_status',
+                        $request->validated(
+                            'payment_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                'orders.'.$sort,
+                strtolower($order)
+                    === 'asc'
+                    ? 'asc'
+                    : 'desc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return OrderResource::collection(
+            $orders
+        )->response();
     }
 
-    public function store(StoreOrderRequest $request): JsonResponse
-    {
-        $order = DB::transaction(function () use ($request) {
-            $listing = Listing::query()
-                ->lockForUpdate()
-                ->findOrFail($request->validated('listing_id'));
+    public function store(
+        StoreOrderRequest $request
+    ): JsonResponse {
+        $validated =
+            $request->validated();
 
-            $quantity = $request->validated('quantity');
+        $requestedItems =
+            collect(
+                $validated['items']
+            );
 
-            if ($listing->status !== ListingStatus::Active) {
-                throw ValidationException::withMessages([
-                    'listing_id' => ['This listing is not available.'],
+        $order = DB::transaction(
+            function () use (
+                $request,
+                $validated,
+                $requestedItems
+            ): Order {
+                /*
+                 * Lock listings in a predictable order.
+                 */
+                $listingIds =
+                    $requestedItems
+                        ->pluck(
+                            'listing_id'
+                        )
+                        ->map(
+                            fn ($id) =>
+                                (int) $id
+                        )
+                        ->sort()
+                        ->values();
+
+                $listings =
+                    Listing::query()
+                        ->with([
+                            'produce.category',
+                            'farmer',
+                        ])
+                        ->whereIn(
+                            'id',
+                            $listingIds
+                        )
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get()
+                        ->keyBy('id');
+
+                $preparedItems = [];
+                $subtotal = '0.00';
+
+                /*
+                 * Revalidate every commercial rule
+                 * while the listing rows are locked.
+                 *
+                 * Request validation gives good API
+                 * feedback. This second validation
+                 * protects the transaction against
+                 * state changing between validation
+                 * and checkout.
+                 */
+                foreach (
+                    $requestedItems
+                    as $index => $item
+                ) {
+                    $listingId =
+                        (int) $item[
+                            'listing_id'
+                        ];
+
+                    $quantity =
+                        (int) $item[
+                            'quantity'
+                        ];
+
+                    $listing =
+                        $listings->get(
+                            $listingId
+                        );
+
+                    if (! $listing) {
+                        throw ValidationException::withMessages([
+                            "items.{$index}.listing_id" => [
+                                'Listing not found.',
+                            ],
+                        ]);
+                    }
+
+                    if (
+                        $listing
+                            ->publication_status
+                        !== ListingPublicationStatus::Live
+                        || $listing->status
+                        !== ListingStatus::Active
+                    ) {
+                        throw ValidationException::withMessages([
+                            "items.{$index}.listing_id" => [
+                                'This listing is not available.',
+                            ],
+                        ]);
+                    }
+
+                    if (
+                        $listing->available_from
+                        !== null
+                        && $listing
+                            ->available_from
+                            ->gt(
+                                now()
+                                    ->startOfDay()
+                            )
+                    ) {
+                        throw ValidationException::withMessages([
+                            "items.{$index}.listing_id" => [
+                                'This listing is not available for ordering yet.',
+                            ],
+                        ]);
+                    }
+
+                    $minimumQuantity =
+                        max(
+                            1,
+                            (int) ceil(
+                                (float) $listing
+                                    ->minimum_order_quantity
+                            )
+                        );
+
+                    if (
+                        $quantity
+                        < $minimumQuantity
+                    ) {
+                        throw ValidationException::withMessages([
+                            "items.{$index}.quantity" => [
+                                "Minimum order quantity for this listing is {$minimumQuantity}.",
+                            ],
+                        ]);
+                    }
+
+                    if (
+                        $listing->stock
+                        < $quantity
+                    ) {
+                        throw ValidationException::withMessages([
+                            "items.{$index}.quantity" => [
+                                'Insufficient stock for this listing.',
+                            ],
+                        ]);
+                    }
+
+                    /*
+                     * price is the current amount charged
+                     * per unit.
+                     *
+                     * original_price exists only to show
+                     * and snapshot the discount.
+                     */
+                    $unitPrice =
+                        (string) $listing->price;
+
+                    $lineTotal =
+                        bcmul(
+                            $unitPrice,
+                            (string) $quantity,
+                            2
+                        );
+
+                    /*
+                     * order_items.discount_amount stores
+                     * the discount for the entire line,
+                     * not just one unit.
+                     */
+                    $discountAmount =
+                        '0.00';
+
+                    if (
+                        $listing->original_price
+                        !== null
+                        && bccomp(
+                            (string)
+                                $listing->original_price,
+                            $unitPrice,
+                            2
+                        ) === 1
+                    ) {
+                        $unitDiscount =
+                            bcsub(
+                                (string)
+                                    $listing->original_price,
+                                $unitPrice,
+                                2
+                            );
+
+                        $discountAmount =
+                            bcmul(
+                                $unitDiscount,
+                                (string) $quantity,
+                                2
+                            );
+                    }
+
+                    $subtotal =
+                        bcadd(
+                            $subtotal,
+                            $lineTotal,
+                            2
+                        );
+
+                    $preparedItems[] = [
+                        'listing_id' =>
+                            $listing->id,
+
+                        'farmer_id' =>
+                            $listing->farmer_id,
+
+                        'produce_id' =>
+                            $listing->produce_id,
+
+                        'produce_name' =>
+                            $listing
+                                ->produce
+                                ->name,
+
+                        'category_name' =>
+                            $listing
+                                ->produce
+                                ->category?->name,
+
+                        'unit' =>
+                            $listing->unit,
+
+                        'quantity' =>
+                            $quantity,
+
+                        /*
+                         * This remains the actual
+                         * selling/charged unit price.
+                         */
+                        'unit_price' =>
+                            $unitPrice,
+
+                        'discount_amount' =>
+                            $discountAmount,
+
+                        'line_total' =>
+                            $lineTotal,
+                    ];
+                }
+
+                $firstItem =
+                    $preparedItems[0];
+
+                /*
+                 * Delivery pricing remains server-owned,
+                 * but no business delivery-fee rule has
+                 * been confirmed yet.
+                 */
+                $deliveryFee =
+                    '0.00';
+
+                $total =
+                    bcadd(
+                        $subtotal,
+                        $deliveryFee,
+                        2
+                    );
+
+                $order = Order::create([
+                    'user_id' =>
+                        $request->user()->id,
+
+                    /*
+                     * Temporary legacy bridge.
+                     */
+                    'listing_id' =>
+                        $firstItem[
+                            'listing_id'
+                        ],
+
+                    'quantity' =>
+                        $firstItem[
+                            'quantity'
+                        ],
+
+                    'subtotal' =>
+                        $subtotal,
+
+                    'delivery_fee' =>
+                        $deliveryFee,
+
+                    'total' =>
+                        $total,
+
+                    'status' =>
+                        OrderStatus::New,
+
+                    'payment_status' =>
+                        'pending',
+
+                    /*
+                     * Delivery snapshot.
+                     */
+                    'delivery_method' =>
+                        $validated[
+                            'delivery_method'
+                        ],
+
+                    'delivery_name' =>
+                        $validated[
+                            'delivery_name'
+                        ],
+
+                    'delivery_phone' =>
+                        $validated[
+                            'delivery_phone'
+                        ],
+
+                    'delivery_state' =>
+                        $validated[
+                            'delivery_state'
+                        ],
+
+                    'delivery_lga' =>
+                        $validated[
+                            'delivery_lga'
+                        ],
+
+                    'delivery_address' =>
+                        $validated[
+                            'delivery_address'
+                        ],
+
+                    'delivery_notes' =>
+                        $validated[
+                            'delivery_notes'
+                        ]
+                        ?? null,
+
+                    'placed_at' =>
+                        now(),
                 ]);
-            }
 
-            if ($listing->stock < $quantity) {
-                throw ValidationException::withMessages([
-                    'quantity' => ['Insufficient stock for this listing.'],
+                $order->update([
+                    'order_number' =>
+                        'ORD-'.str_pad(
+                            (string) $order->id,
+                            6,
+                            '0',
+                            STR_PAD_LEFT
+                        ),
                 ]);
+
+                /*
+                 * Stock changes only after all items
+                 * successfully pass validation.
+                 */
+                foreach (
+                    $preparedItems
+                    as $preparedItem
+                ) {
+                    $listing =
+                        $listings->get(
+                            $preparedItem[
+                                'listing_id'
+                            ]
+                        );
+
+                    $listing->decrement(
+                        'stock',
+                        $preparedItem[
+                            'quantity'
+                        ]
+                    );
+
+                    $order
+                        ->items()
+                        ->create(
+                            $preparedItem
+                        );
+                }
+
+                return $order;
             }
+        );
 
-            $listing->decrement('stock', $quantity);
+        $order->load([
+            'items.produce.category',
+            'items.farmer',
 
-            return Order::create([
-                'user_id' => $request->user()->id,
-                'listing_id' => $listing->id,
-                'quantity' => $quantity,
-                'total' => bcmul((string) $listing->price, (string) $quantity, 2),
-                'status' => OrderStatus::New,
-            ]);
-        });
-
-        $order->load(['listing.produce.category']);
+            // Legacy compatibility.
+            'listing.produce.category',
+            'listing.farmer',
+        ]);
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource(
+                    $order
+                ),
         ], 201);
     }
 
-    public function show(Request $request, Order $order): JsonResponse
-    {
-        if ($order->user_id !== $request->user()->id) {
-            return response()->json(['message' => 'Order not found.'], 404);
+    public function show(
+        Request $request,
+        Order $order
+    ): JsonResponse {
+        if (
+            $order->user_id
+            !== $request->user()->id
+        ) {
+            return response()->json([
+                'message' =>
+                    'Order not found.',
+            ], 404);
         }
 
-        $order->load(['listing.produce.category']);
+        $order->load([
+            'statusEvents.changedBy',
+
+            'items.produce.category',
+            'items.farmer',
+
+            // Legacy compatibility.
+            'listing.produce.category',
+            'listing.farmer',
+        ]);
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource(
+                    $order
+                ),
         ]);
     }
 
-    public function cancel(Request $request, Order $order): JsonResponse
-    {
-        if ($order->user_id !== $request->user()->id) {
-            return response()->json(['message' => 'Order not found.'], 404);
+    public function cancel(
+        Request $request,
+        Order $order
+    ): JsonResponse {
+        if (
+            $order->user_id
+            !== $request->user()->id
+        ) {
+            return response()->json([
+                'message' =>
+                    'Order not found.',
+            ], 404);
         }
 
-        if (! $order->isCancellable()) {
+        if (
+            ! $order->isCancellable()
+        ) {
             return response()->json([
-                'message' => 'Only orders with status new can be cancelled.',
+                'message' =>
+                    'Only orders with status new can be cancelled.',
             ], 422);
         }
 
-        $order = DB::transaction(function () use ($order) {
-            $order->update(['status' => OrderStatus::Cancelled]);
+        $order = DB::transaction(
+            function () use (
+                $order
+            ): Order {
+                $lockedOrder =
+                    Order::query()
+                        ->whereKey(
+                            $order->id
+                        )
+                        ->lockForUpdate()
+                        ->firstOrFail();
 
-            $order->listing()->lockForUpdate()->first()?->increment('stock', $order->quantity);
+                if (
+                    ! $lockedOrder
+                        ->isCancellable()
+                ) {
+                    throw ValidationException::withMessages([
+                        'order' => [
+                            'Only orders with status new can be cancelled.',
+                        ],
+                    ]);
+                }
 
-            return $order->fresh(['listing.produce.category']);
-        });
+                $this->restoreOrderStock(
+                    $lockedOrder
+                );
+
+                $lockedOrder->update([
+                    'status' =>
+                        OrderStatus::Cancelled,
+
+                    'cancelled_at' =>
+                        now(),
+                ]);
+
+                return $lockedOrder->fresh([
+                    'statusEvents.changedBy',
+
+                    'items.produce.category',
+                    'items.farmer',
+
+                    // Legacy compatibility.
+                    'listing.produce.category',
+                    'listing.farmer',
+                ]);
+            }
+        );
 
         return response()->json([
-            'data' => new OrderResource($order),
+            'data' =>
+                new OrderResource(
+                    $order
+                ),
         ]);
+    }
+
+    private function restoreOrderStock(
+        Order $order
+    ): void {
+        $order->loadMissing(
+            'items'
+        );
+
+        if (
+            $order
+                ->items
+                ->isNotEmpty()
+        ) {
+            $listingIds =
+                $order
+                    ->items
+                    ->pluck(
+                        'listing_id'
+                    )
+                    ->filter()
+                    ->map(
+                        fn ($id) =>
+                            (int) $id
+                    )
+                    ->unique()
+                    ->sort()
+                    ->values();
+
+            $listings =
+                Listing::query()
+                    ->whereIn(
+                        'id',
+                        $listingIds
+                    )
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+            foreach (
+                $order->items
+                as $item
+            ) {
+                if (
+                    ! $item->listing_id
+                ) {
+                    continue;
+                }
+
+                $listings
+                    ->get(
+                        $item->listing_id
+                    )
+                    ?->increment(
+                        'stock',
+                        $item->quantity
+                    );
+            }
+
+            return;
+        }
+
+        /*
+         * Legacy order support.
+         */
+        if (
+            $order->listing_id
+            && $order->quantity
+        ) {
+            Listing::query()
+                ->whereKey(
+                    $order->listing_id
+                )
+                ->lockForUpdate()
+                ->first()
+                ?->increment(
+                    'stock',
+                    $order->quantity
+                );
+        }
     }
 }

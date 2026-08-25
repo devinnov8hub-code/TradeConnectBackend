@@ -1,0 +1,4679 @@
+=== app/Models/Listing.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\ListingStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+#[Fillable([
+    'farmer_id',
+    'produce_id',
+    'price',
+    'unit',
+    'stock',
+    'status',
+])]
+class Listing extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'price' => 'decimal:2',
+            'status' => ListingStatus::class,
+        ];
+    }
+
+    /*
+     * Legacy single-listing order relationship.
+     */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class);
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(OrderItem::class);
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(Farmer::class);
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(Produce::class);
+    }
+}
+
+=== app/Models/Produce.php ===
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+#[Fillable(['category_id', 'name', 'image', 'image_mime'])]
+class Produce extends Model
+{
+    protected $table = 'produce';
+
+    protected $appends = ['image_url'];
+
+    public function getImageUrlAttribute(): ?string
+    {
+        if (! $this->image || ! $this->image_mime) {
+            return null;
+        }
+
+        return 'data:'.$this->image_mime.';base64,'.$this->image;
+    }
+
+    public function category(): BelongsTo
+    {
+        return $this->belongsTo(Category::class);
+    }
+}
+
+=== app/Models/OrderItem.php ===
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+#[Fillable([
+    'order_id',
+    'listing_id',
+    'farmer_id',
+    'produce_id',
+    'produce_name',
+    'category_name',
+    'unit',
+    'quantity',
+    'unit_price',
+    'discount_amount',
+    'line_total',
+])]
+class OrderItem extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'unit_price' => 'decimal:2',
+            'discount_amount' => 'decimal:2',
+            'line_total' => 'decimal:2',
+        ];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
+    }
+
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(Listing::class);
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(Farmer::class);
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(Produce::class);
+    }
+}
+
+=== app/Http/Resources/ListingResource.php ===
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class ListingResource extends JsonResource
+{
+    public function toArray(Request $request): array
+    {
+        return [
+            'id' => $this->id,
+            'farmer_id' => $this->farmer_id,
+            'produce_id' => $this->produce_id,
+
+            'price' => $this->price,
+            'unit' => $this->unit,
+            'stock' => $this->stock,
+
+            'status' => $this->status->value,
+
+            'produce' => [
+                'id' => $this->produce->id,
+                'name' => $this->produce->name,
+                'image_url' => $this->produce->image_url,
+
+                'category' => [
+                    'id' => $this->produce->category->id,
+                    'name' => $this->produce->category->name,
+                ],
+            ],
+
+            'farmer' => [
+                'id' => $this->farmer->id,
+                'name' => $this->farmer->name,
+                'state' => $this->farmer->state,
+                'lga' => $this->farmer->lga,
+            ],
+
+            'created_at' => $this->created_at,
+            'updated_at' => $this->updated_at,
+        ];
+    }
+}
+
+=== Admin ListingController ===
+<?php
+
+namespace App\Http\Controllers\Api\V1\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerListingRequest;
+use App\Http\Requests\Admin\IndexListingRequest;
+use App\Http\Requests\Admin\StoreListingRequest;
+use App\Http\Requests\Admin\UpdateListingRequest;
+use App\Http\Resources\ListingResource;
+use App\Models\Farmer;
+use App\Models\Listing;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+
+class ListingController extends Controller
+{
+    public function all(
+        IndexListingRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $listings = Listing::query()
+            ->with([
+                'produce.category',
+                'farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'listings.unit',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'produce',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                )
+                                ->orWhereHas(
+                                    'farmer',
+                                    function (
+                                        Builder $q
+                                    ) use ($search): void {
+                                        $q
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'farmer_code',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'produce.category',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('farmer_id'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.farmer_id',
+                        $request->validated(
+                            'farmer_id'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled('category_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'produce',
+                        fn (Builder $q) =>
+                            $q->where(
+                                'category_id',
+                                $request->validated(
+                                    'category_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->tap(
+                fn (Builder $query) =>
+                    $this->applySort(
+                        $query,
+                        $sort,
+                        $order
+                    )
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return ListingResource::collection(
+            $listings
+        )->response();
+    }
+
+    public function index(
+        IndexFarmerListingRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $listings = $farmer
+            ->listings()
+            ->with([
+                'produce.category',
+                'farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'listings.unit',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'produce',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                )
+                                ->orWhereHas(
+                                    'produce.category',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('category_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'produce',
+                        fn (Builder $q) =>
+                            $q->where(
+                                'category_id',
+                                $request->validated(
+                                    'category_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->tap(
+                fn (Builder $query) =>
+                    $this->applySort(
+                        $query,
+                        $sort,
+                        $order
+                    )
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return ListingResource::collection(
+            $listings
+        )->response();
+    }
+
+    public function store(
+        StoreListingRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $listing = $farmer
+            ->listings()
+            ->create(
+                $request->validated()
+            );
+
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ], 201);
+    }
+
+    public function show(
+        Listing $listing
+    ): JsonResponse {
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ]);
+    }
+
+    public function update(
+        UpdateListingRequest $request,
+        Listing $listing
+    ): JsonResponse {
+        $listing->update(
+            $request->validated()
+        );
+
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ]);
+    }
+
+    public function destroy(
+        Listing $listing
+    ): JsonResponse {
+        $listing->delete();
+
+        return response()->json([
+            'message' =>
+                'Listing deleted.',
+        ]);
+    }
+
+    private function applySort(
+        Builder $query,
+        string $sort,
+        string $order
+    ): void {
+        $direction =
+            strtolower($order) === 'asc'
+                ? 'asc'
+                : 'desc';
+
+        match ($sort) {
+            'price' =>
+                $query->orderBy(
+                    'listings.price',
+                    $direction
+                ),
+
+            'stock' =>
+                $query->orderBy(
+                    'listings.stock',
+                    $direction
+                ),
+
+            'produce' =>
+                $query
+                    ->join(
+                        'produce',
+                        'listings.produce_id',
+                        '=',
+                        'produce.id'
+                    )
+                    ->orderBy(
+                        'produce.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            'farmer' =>
+                $query
+                    ->join(
+                        'farmers',
+                        'listings.farmer_id',
+                        '=',
+                        'farmers.id'
+                    )
+                    ->orderBy(
+                        'farmers.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            'category' =>
+                $query
+                    ->join(
+                        'produce',
+                        'listings.produce_id',
+                        '=',
+                        'produce.id'
+                    )
+                    ->join(
+                        'categories',
+                        'produce.category_id',
+                        '=',
+                        'categories.id'
+                    )
+                    ->orderBy(
+                        'categories.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            default =>
+                $query->orderBy(
+                    'listings.created_at',
+                    $direction
+                ),
+        };
+    }
+}
+
+=== Public ListingController candidates ===
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Controllers\Api\V1\ListingController.php ---
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+
+use App\Enums\ListingStatus;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Listing\IndexListingRequest;
+use App\Http\Resources\ListingResource;
+use App\Models\Listing;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+
+class ListingController extends Controller
+{
+    public function index(
+        IndexListingRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $listings = Listing::query()
+            ->with([
+                'produce.category',
+                'farmer',
+            ])
+            ->where(
+                'status',
+                ListingStatus::Active
+            )
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->whereHas(
+                                    'produce',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                )
+                                ->orWhereHas(
+                                    'farmer',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                )
+                                ->orWhereHas(
+                                    'produce.category',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('category_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'produce',
+                        fn (Builder $q) =>
+                            $q->where(
+                                'category_id',
+                                $request->validated(
+                                    'category_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->when(
+                $request->filled('farmer_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->where(
+                        'farmer_id',
+                        $request->validated(
+                            'farmer_id'
+                        )
+                    );
+                }
+            )
+            ->tap(
+                fn (Builder $query) =>
+                    $this->applySort(
+                        $query,
+                        $sort,
+                        $order
+                    )
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return ListingResource::collection(
+            $listings
+        )->response();
+    }
+
+    public function show(
+        Listing $listing
+    ): JsonResponse {
+        if (
+            $listing->status
+            !== ListingStatus::Active
+        ) {
+            return response()->json([
+                'message' =>
+                    'Listing not found.',
+            ], 404);
+        }
+
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ]);
+    }
+
+    private function applySort(
+        Builder $query,
+        string $sort,
+        string $order
+    ): void {
+        $direction =
+            strtolower($order) === 'asc'
+                ? 'asc'
+                : 'desc';
+
+        match ($sort) {
+            'price' =>
+                $query->orderBy(
+                    'price',
+                    $direction
+                ),
+
+            'stock' =>
+                $query->orderBy(
+                    'stock',
+                    $direction
+                ),
+
+            'produce' =>
+                $query
+                    ->join(
+                        'produce',
+                        'listings.produce_id',
+                        '=',
+                        'produce.id'
+                    )
+                    ->orderBy(
+                        'produce.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            'farmer' =>
+                $query
+                    ->join(
+                        'farmers',
+                        'listings.farmer_id',
+                        '=',
+                        'farmers.id'
+                    )
+                    ->orderBy(
+                        'farmers.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            'category' =>
+                $query
+                    ->join(
+                        'produce',
+                        'listings.produce_id',
+                        '=',
+                        'produce.id'
+                    )
+                    ->join(
+                        'categories',
+                        'produce.category_id',
+                        '=',
+                        'categories.id'
+                    )
+                    ->orderBy(
+                        'categories.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            default =>
+                $query->orderBy(
+                    'created_at',
+                    $direction
+                ),
+        };
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Controllers\Api\V1\Admin\ListingController.php ---
+<?php
+
+namespace App\Http\Controllers\Api\V1\Admin;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerListingRequest;
+use App\Http\Requests\Admin\IndexListingRequest;
+use App\Http\Requests\Admin\StoreListingRequest;
+use App\Http\Requests\Admin\UpdateListingRequest;
+use App\Http\Resources\ListingResource;
+use App\Models\Farmer;
+use App\Models\Listing;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+
+class ListingController extends Controller
+{
+    public function all(
+        IndexListingRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $listings = Listing::query()
+            ->with([
+                'produce.category',
+                'farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'listings.unit',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'produce',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                )
+                                ->orWhereHas(
+                                    'farmer',
+                                    function (
+                                        Builder $q
+                                    ) use ($search): void {
+                                        $q
+                                            ->where(
+                                                'name',
+                                                'like',
+                                                $search
+                                            )
+                                            ->orWhere(
+                                                'farmer_code',
+                                                'like',
+                                                $search
+                                            );
+                                    }
+                                )
+                                ->orWhereHas(
+                                    'produce.category',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('farmer_id'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.farmer_id',
+                        $request->validated(
+                            'farmer_id'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled('category_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'produce',
+                        fn (Builder $q) =>
+                            $q->where(
+                                'category_id',
+                                $request->validated(
+                                    'category_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->tap(
+                fn (Builder $query) =>
+                    $this->applySort(
+                        $query,
+                        $sort,
+                        $order
+                    )
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return ListingResource::collection(
+            $listings
+        )->response();
+    }
+
+    public function index(
+        IndexFarmerListingRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'created_at'
+        ) ?? 'created_at';
+
+        $order = $request->validated(
+            'order',
+            'desc'
+        ) ?? 'desc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $listings = $farmer
+            ->listings()
+            ->with([
+                'produce.category',
+                'farmer',
+            ])
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated('search')
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'listings.unit',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhereHas(
+                                    'produce',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                )
+                                ->orWhereHas(
+                                    'produce.category',
+                                    fn (Builder $q) =>
+                                        $q->where(
+                                            'name',
+                                            'like',
+                                            $search
+                                        )
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('category_id'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $query->whereHas(
+                        'produce',
+                        fn (Builder $q) =>
+                            $q->where(
+                                'category_id',
+                                $request->validated(
+                                    'category_id'
+                                )
+                            )
+                    );
+                }
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'listings.status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->tap(
+                fn (Builder $query) =>
+                    $this->applySort(
+                        $query,
+                        $sort,
+                        $order
+                    )
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return ListingResource::collection(
+            $listings
+        )->response();
+    }
+
+    public function store(
+        StoreListingRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $listing = $farmer
+            ->listings()
+            ->create(
+                $request->validated()
+            );
+
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ], 201);
+    }
+
+    public function show(
+        Listing $listing
+    ): JsonResponse {
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ]);
+    }
+
+    public function update(
+        UpdateListingRequest $request,
+        Listing $listing
+    ): JsonResponse {
+        $listing->update(
+            $request->validated()
+        );
+
+        $listing->load([
+            'produce.category',
+            'farmer',
+        ]);
+
+        return response()->json([
+            'data' =>
+                new ListingResource($listing),
+        ]);
+    }
+
+    public function destroy(
+        Listing $listing
+    ): JsonResponse {
+        $listing->delete();
+
+        return response()->json([
+            'message' =>
+                'Listing deleted.',
+        ]);
+    }
+
+    private function applySort(
+        Builder $query,
+        string $sort,
+        string $order
+    ): void {
+        $direction =
+            strtolower($order) === 'asc'
+                ? 'asc'
+                : 'desc';
+
+        match ($sort) {
+            'price' =>
+                $query->orderBy(
+                    'listings.price',
+                    $direction
+                ),
+
+            'stock' =>
+                $query->orderBy(
+                    'listings.stock',
+                    $direction
+                ),
+
+            'produce' =>
+                $query
+                    ->join(
+                        'produce',
+                        'listings.produce_id',
+                        '=',
+                        'produce.id'
+                    )
+                    ->orderBy(
+                        'produce.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            'farmer' =>
+                $query
+                    ->join(
+                        'farmers',
+                        'listings.farmer_id',
+                        '=',
+                        'farmers.id'
+                    )
+                    ->orderBy(
+                        'farmers.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            'category' =>
+                $query
+                    ->join(
+                        'produce',
+                        'listings.produce_id',
+                        '=',
+                        'produce.id'
+                    )
+                    ->join(
+                        'categories',
+                        'produce.category_id',
+                        '=',
+                        'categories.id'
+                    )
+                    ->orderBy(
+                        'categories.name',
+                        $direction
+                    )
+                    ->select(
+                        'listings.*'
+                    ),
+
+            default =>
+                $query->orderBy(
+                    'listings.created_at',
+                    $direction
+                ),
+        };
+    }
+}
+
+=== Listing requests ===
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'category_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:categories,id',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(ListingStatus::class),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'created_at',
+                    'price',
+                    'stock',
+                    'produce',
+                    'category',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'category_id.exists' =>
+                'Category not found.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'sort.in' =>
+                'Sort must be one of: created_at, price, stock, produce, category.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'farmer_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:farmers,id',
+            ],
+
+            'category_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:categories,id',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(ListingStatus::class),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'created_at',
+                    'price',
+                    'stock',
+                    'produce',
+                    'farmer',
+                    'category',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'farmer_id.exists' =>
+                'Farmer not found.',
+
+            'category_id.exists' =>
+                'Category not found.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'sort.in' =>
+                'Sort must be one of: created_at, price, stock, produce, farmer, category.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\StoreListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class StoreListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        $farmer = $this->route('farmer');
+
+        return [
+            'produce_id' => [
+                'required',
+                'integer',
+                'exists:produce,id',
+
+                Rule::unique(
+                    'listings',
+                    'produce_id'
+                )->where(
+                    'farmer_id',
+                    $farmer->id
+                ),
+            ],
+
+            'price' => [
+                'required',
+                'numeric',
+                'min:0',
+            ],
+
+            'unit' => [
+                'required',
+                'string',
+                'max:50',
+            ],
+
+            'stock' => [
+                'required',
+                'integer',
+                'min:0',
+            ],
+
+            'status' => [
+                'required',
+                Rule::enum(
+                    ListingStatus::class
+                ),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'produce_id.required' =>
+                'Produce is required.',
+
+            'produce_id.exists' =>
+                'Produce not found.',
+
+            'produce_id.unique' =>
+                'This farmer already has a listing for this produce.',
+
+            'price.required' =>
+                'Price is required.',
+
+            'price.min' =>
+                'Price must be at least 0.',
+
+            'unit.required' =>
+                'Unit is required.',
+
+            'unit.max' =>
+                'Unit cannot exceed 50 characters.',
+
+            'stock.required' =>
+                'Stock is required.',
+
+            'stock.min' =>
+                'Stock must be at least 0.',
+
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        /** @var \App\Models\Listing $listing */
+        $listing = $this->route('listing');
+
+        return [
+            'produce_id' => [
+                'required',
+                'integer',
+                'exists:produce,id',
+
+                Rule::unique(
+                    'listings',
+                    'produce_id'
+                )
+                    ->where(
+                        'farmer_id',
+                        $listing->farmer_id
+                    )
+                    ->ignore($listing),
+            ],
+
+            'price' => [
+                'required',
+                'numeric',
+                'min:0',
+            ],
+
+            'unit' => [
+                'required',
+                'string',
+                'max:50',
+            ],
+
+            'stock' => [
+                'required',
+                'integer',
+                'min:0',
+            ],
+
+            'status' => [
+                'required',
+                Rule::enum(
+                    ListingStatus::class
+                ),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'produce_id.required' =>
+                'Produce is required.',
+
+            'produce_id.exists' =>
+                'Produce not found.',
+
+            'produce_id.unique' =>
+                'This farmer already has a listing for this produce.',
+
+            'price.required' =>
+                'Price is required.',
+
+            'price.min' =>
+                'Price must be at least 0.',
+
+            'unit.required' =>
+                'Unit is required.',
+
+            'unit.max' =>
+                'Unit cannot exceed 50 characters.',
+
+            'stock.required' =>
+                'Stock is required.',
+
+            'stock.min' =>
+                'Stock must be at least 0.',
+
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Listing\IndexListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Listing;
+
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'category_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:categories,id',
+            ],
+
+            'farmer_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:farmers,id',
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'price',
+                    'stock',
+                    'created_at',
+                    'produce',
+                    'farmer',
+                    'category',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'category_id.exists' =>
+                'Category not found.',
+
+            'farmer_id.exists' =>
+                'Farmer not found.',
+
+            'sort.in' =>
+                'Sort must be one of: price, stock, created_at, produce, farmer, category.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+=== app/Enums/ListingStatus.php ===
+<?php
+
+namespace App\Enums;
+
+enum ListingStatus: string
+{
+    case Active = 'active';
+    case Inactive = 'inactive';
+}
+
+=== Listing / Produce migrations ===
+
+--- database/migrations/2026_06_10_100001_create_produce_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('produce', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('category_id')->constrained()->cascadeOnDelete();
+            $table->string('name');
+            $table->timestamps();
+
+            $table->unique(['category_id', 'name']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('produce');
+    }
+};
+
+--- database/migrations/2026_06_10_120000_create_listings_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('listings', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('farmer_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('produce_id')->constrained('produce')->cascadeOnDelete();
+            $table->decimal('price', 12, 2);
+            $table->unsignedInteger('stock');
+            $table->string('status')->default('active');
+            $table->timestamps();
+
+            $table->unique(['farmer_id', 'produce_id']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('listings');
+    }
+};
+
+--- database/migrations/2026_06_10_130000_add_image_to_produce_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('produce', function (Blueprint $table) {
+            $table->string('image')->nullable()->after('name');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('produce', function (Blueprint $table) {
+            $table->dropColumn('image');
+        });
+    }
+};
+
+--- database/migrations/2026_06_10_140000_store_produce_image_as_base64.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('produce', function (Blueprint $table) {
+            $table->longText('image')->nullable()->change();
+            $table->string('image_mime')->nullable()->after('image');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('produce', function (Blueprint $table) {
+            $table->string('image')->nullable()->change();
+            $table->dropColumn('image_mime');
+        });
+    }
+};
+
+--- database/migrations/2026_08_13_090841_add_unit_to_listings_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('listings', function (Blueprint $table) {
+            $table->string('unit', 50)
+                ->nullable()
+                ->after('price');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('listings', function (Blueprint $table) {
+            $table->dropColumn('unit');
+        });
+    }
+};
+
+=== Listing tests ===
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerListingIndexTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerListingIndexTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' => UserRole::Admin,
+        ]);
+
+        return auth('api')->login($admin);
+    }
+
+    public function test_admin_can_get_paginated_listings_for_one_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $otherFarmer = $this->createFarmer(
+            'Ada Okoro'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $maize,
+            30000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        /*
+         * Must not appear because this belongs
+         * to another farmer.
+         */
+        $this->createListing(
+            $otherFarmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?per_page=1'
+                .'&page=1'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.last_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.total',
+                2
+            )
+            ->assertJsonPath(
+                'data.0.farmer_id',
+                $farmer->id
+            )
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id',
+                        'farmer_id',
+                        'produce_id',
+                        'price',
+                        'unit',
+                        'stock',
+                        'status',
+                        'produce',
+                        'farmer',
+                    ],
+                ],
+
+                'links' => [
+                    'first',
+                    'last',
+                    'prev',
+                    'next',
+                ],
+
+                'meta' => [
+                    'current_page',
+                    'from',
+                    'last_page',
+                    'links',
+                    'path',
+                    'per_page',
+                    'to',
+                    'total',
+                ],
+            ]);
+    }
+
+    public function test_admin_can_search_farmer_listings(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?search=Rice'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?search=Grains'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+    }
+
+    public function test_admin_can_filter_farmer_listings_by_category_and_status(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Inactive
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?category_id='
+                .$rice->category_id
+                .'&status=active'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            )
+            ->assertJsonPath(
+                'data.0.status',
+                'active'
+            );
+    }
+
+    public function test_admin_can_sort_farmer_listings_by_price(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $expensive = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $cheap = $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?sort=price'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $cheap->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $expensive->id
+            );
+    }
+
+    public function test_admin_can_sort_farmer_listings_by_category(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $grainListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $vegetableListing = $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?sort=category'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $grainListing->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $vegetableListing->id
+            );
+    }
+
+    public function test_farmer_listing_pagination_preserves_filters(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $maize,
+            30000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?status=active'
+                .'&sort=price'
+                .'&order=asc'
+                .'&per_page=1'
+            );
+
+        $response->assertOk();
+
+        $next = $response->json(
+            'links.next'
+        );
+
+        $this->assertNotNull(
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'status=active',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'sort=price',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'order=asc',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'per_page=1',
+            $next
+        );
+    }
+
+    public function test_invalid_farmer_listing_filters_are_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?status=pending'
+                .'&sort=unknown'
+                .'&per_page=101'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'status',
+                'sort',
+                'per_page',
+            ]);
+    }
+
+    private function createFarmer(
+        string $name
+    ): Farmer {
+        return Farmer::create([
+            'name' =>
+                $name,
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+    }
+
+    private function createProduce(
+        string $name,
+        string $categoryName
+    ): Produce {
+        /*
+         * More than one produce can belong to the same
+         * category. Reuse it instead of trying to insert
+         * another category with the same unique name.
+         */
+        $category = Category::firstOrCreate([
+            'name' =>
+                $categoryName,
+        ]);
+
+        return Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                $name,
+
+            'image' =>
+                base64_encode(
+                    strtolower($name)
+                ),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+    }
+
+    private function createListing(
+        Farmer $farmer,
+        Produce $produce,
+        int $price,
+        string $unit,
+        ListingStatus $status
+    ): Listing {
+        return Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                $price,
+
+            'unit' =>
+                $unit,
+
+            'stock' =>
+                50,
+
+            'status' =>
+                $status,
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\ListingIndexTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class ListingIndexTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' =>
+                UserRole::Admin,
+        ]);
+
+        return auth('api')->login(
+            $admin
+        );
+    }
+
+    public function test_admin_can_get_paginated_global_listing_list(): void
+    {
+        $token = $this->adminToken();
+
+        $farmerOne = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $farmerTwo = $this->createFarmer(
+            'Ada Okoro',
+            '08022222222'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $this->createListing(
+            $farmerOne,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmerOne,
+            $maize,
+            30000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmerTwo,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Inactive
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?per_page=2'
+                .'&page=1'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                2,
+                'data'
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.last_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.total',
+                3
+            )
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id',
+                        'farmer_id',
+                        'produce_id',
+                        'price',
+                        'unit',
+                        'stock',
+                        'status',
+                        'produce',
+                        'farmer',
+                    ],
+                ],
+
+                'links' => [
+                    'first',
+                    'last',
+                    'prev',
+                    'next',
+                ],
+
+                'meta' => [
+                    'current_page',
+                    'from',
+                    'last_page',
+                    'links',
+                    'path',
+                    'per_page',
+                    'to',
+                    'total',
+                ],
+            ]);
+    }
+
+    public function test_admin_can_search_global_listings(): void
+    {
+        $token = $this->adminToken();
+
+        $ibrahim = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $ada = $this->createFarmer(
+            'Ada Okoro',
+            '08022222222'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $ibrahim,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $ada,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?search=Rice'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?search=Ibrahim'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?search='
+                .$ibrahim->farmer_code
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+    }
+
+    public function test_admin_can_filter_global_listings(): void
+    {
+        $token = $this->adminToken();
+
+        $ibrahim = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $ada = $this->createFarmer(
+            'Ada Okoro',
+            '08022222222'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $ibrahim,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $ada,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Inactive
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?farmer_id='
+                .$ibrahim->id
+                .'&category_id='
+                .$rice->category_id
+                .'&status=active'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            )
+            ->assertJsonPath(
+                'data.0.farmer_id',
+                $ibrahim->id
+            )
+            ->assertJsonPath(
+                'data.0.status',
+                'active'
+            );
+    }
+
+    public function test_admin_can_sort_global_listings_by_price(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $expensive = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $cheap = $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?sort=price'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $cheap->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $expensive->id
+            );
+    }
+
+    public function test_admin_can_sort_global_listings_by_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $ibrahim = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $ada = $this->createFarmer(
+            'Ada Okoro',
+            '08022222222'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $ibrahimListing = $this->createListing(
+            $ibrahim,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $adaListing = $this->createListing(
+            $ada,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?sort=farmer'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $adaListing->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $ibrahimListing->id
+            );
+    }
+
+    public function test_global_listing_pagination_preserves_filters(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $maize,
+            30000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?farmer_id='
+                .$farmer->id
+                .'&status=active'
+                .'&sort=price'
+                .'&order=asc'
+                .'&per_page=1'
+            );
+
+        $response->assertOk();
+
+        $next = $response->json(
+            'links.next'
+        );
+
+        $this->assertNotNull(
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'farmer_id='.$farmer->id,
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'status=active',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'sort=price',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'order=asc',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'per_page=1',
+            $next
+        );
+    }
+
+    public function test_invalid_global_listing_filters_are_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+                .'?farmer_id=99999'
+                .'&category_id=99999'
+                .'&status=pending'
+                .'&sort=unknown'
+                .'&per_page=101'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'farmer_id',
+                'category_id',
+                'status',
+                'sort',
+                'per_page',
+            ]);
+    }
+
+    private function createFarmer(
+        string $name,
+        string $phoneNumber
+    ): Farmer {
+        return Farmer::create([
+            'name' =>
+                $name,
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                $phoneNumber,
+        ]);
+    }
+
+    private function createProduce(
+        string $name,
+        string $categoryName
+    ): Produce {
+        $category = Category::firstOrCreate([
+            'name' =>
+                $categoryName,
+        ]);
+
+        return Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                $name,
+
+            'image' =>
+                base64_encode(
+                    strtolower($name)
+                ),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+    }
+
+    private function createListing(
+        Farmer $farmer,
+        Produce $produce,
+        int $price,
+        string $unit,
+        ListingStatus $status
+    ): Listing {
+        return Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                $price,
+
+            'unit' =>
+                $unit,
+
+            'stock' =>
+                50,
+
+            'status' =>
+                $status,
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\ListingTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class ListingTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' => UserRole::Admin,
+        ]);
+
+        return auth('api')->login($admin);
+    }
+
+    public function test_admin_can_get_all_listings(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $produce = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        Listing::create([
+            'farmer_id' => $farmer->id,
+            'produce_id' => $produce->id,
+            'price' => 45000,
+            'unit' => 'bag',
+            'stock' => 120,
+            'status' => ListingStatus::Active,
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.farmer_id',
+                $farmer->id
+            )
+            ->assertJsonPath(
+                'data.0.produce_id',
+                $produce->id
+            )
+            ->assertJsonPath(
+                'data.0.produce.name',
+                'Rice'
+            )
+            ->assertJsonPath(
+                'data.0.produce.category.name',
+                'Grains'
+            )
+            ->assertJsonPath(
+                'data.0.unit',
+                'bag'
+            );
+    }
+
+    public function test_admin_can_add_listing_for_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $produce = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->postJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings",
+                [
+                    'produce_id' =>
+                        $produce->id,
+
+                    'price' =>
+                        45000,
+
+                    'unit' =>
+                        'bag',
+
+                    'stock' =>
+                        120,
+
+                    'status' =>
+                        ListingStatus::Active->value,
+                ]
+            );
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath(
+                'data.farmer_id',
+                $farmer->id
+            )
+            ->assertJsonPath(
+                'data.produce_id',
+                $produce->id
+            )
+            ->assertJsonPath(
+                'data.price',
+                '45000.00'
+            )
+            ->assertJsonPath(
+                'data.unit',
+                'bag'
+            )
+            ->assertJsonPath(
+                'data.stock',
+                120
+            )
+            ->assertJsonPath(
+                'data.status',
+                ListingStatus::Active->value
+            );
+
+        $this->assertDatabaseHas(
+            'listings',
+            [
+                'farmer_id' =>
+                    $farmer->id,
+
+                'produce_id' =>
+                    $produce->id,
+
+                'unit' =>
+                    'bag',
+            ]
+        );
+    }
+
+    public function test_admin_can_update_listing_unit(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $produce = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $listing = Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                45000,
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                120,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/listings/{$listing->id}",
+                [
+                    'produce_id' =>
+                        $produce->id,
+
+                    'price' =>
+                        5000,
+
+                    'unit' =>
+                        'kg',
+
+                    'stock' =>
+                        80,
+
+                    'status' =>
+                        ListingStatus::Active->value,
+                ]
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.price',
+                '5000.00'
+            )
+            ->assertJsonPath(
+                'data.unit',
+                'kg'
+            )
+            ->assertJsonPath(
+                'data.stock',
+                80
+            );
+
+        $this->assertDatabaseHas(
+            'listings',
+            [
+                'id' =>
+                    $listing->id,
+
+                'unit' =>
+                    'kg',
+
+                'stock' =>
+                    80,
+            ]
+        );
+    }
+
+    public function test_unit_is_required_when_creating_listing(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $produce = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $this
+            ->withToken($token)
+            ->postJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings",
+                [
+                    'produce_id' =>
+                        $produce->id,
+
+                    'price' =>
+                        45000,
+
+                    'stock' =>
+                        120,
+
+                    'status' =>
+                        ListingStatus::Active->value,
+                ]
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'unit',
+            ]);
+    }
+
+    public function test_admin_cannot_add_duplicate_produce_listing_for_same_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $produce = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                45000,
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                120,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->postJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings",
+                [
+                    'produce_id' =>
+                        $produce->id,
+
+                    'price' =>
+                        50000,
+
+                    'unit' =>
+                        'bag',
+
+                    'stock' =>
+                        50,
+
+                    'status' =>
+                        ListingStatus::Active->value,
+                ]
+            );
+
+        $response
+            ->assertUnprocessable()
+            ->assertJsonPath(
+                'errors.produce_id.0',
+                'This farmer already has a listing for this produce.'
+            );
+    }
+
+    public function test_missing_listing_returns_not_found(): void
+    {
+        $token = $this->adminToken();
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/listings/99999'
+            )
+            ->assertNotFound()
+            ->assertJson([
+                'message' =>
+                    'Listing not found.',
+            ]);
+    }
+
+    private function createFarmer(): Farmer
+    {
+        return Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+    }
+
+    private function createProduce(
+        string $name,
+        string $categoryName
+    ): Produce {
+        $category = Category::create([
+            'name' =>
+                $categoryName,
+        ]);
+
+        return Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                $name,
+
+            'image' =>
+                base64_encode(
+                    strtolower($name)
+                ),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Listing\ListingUnitTest.php ---
+<?php
+
+namespace Tests\Feature\Listing;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class ListingUnitTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_public_listing_exposes_unit(): void
+    {
+        $listing = $this->createListing(
+            'bag'
+        );
+
+        $this
+            ->getJson(
+                "/api/v1/listings/{$listing->id}"
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.unit',
+                'bag'
+            )
+            ->assertJsonPath(
+                'data.price',
+                '45000.00'
+            );
+    }
+
+    public function test_order_snapshots_listing_unit(): void
+    {
+        $listing = $this->createListing(
+            'bag'
+        );
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $token = auth('api')->login(
+            $buyer
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->postJson(
+                '/api/v1/orders',
+                [
+                    'items' => [
+                        [
+                            'listing_id' =>
+                                $listing->id,
+
+                            'quantity' =>
+                                2,
+                        ],
+                    ],
+
+                    'delivery_method' =>
+                        'standard',
+
+                    'delivery_name' =>
+                        'Test Buyer',
+
+                    'delivery_phone' =>
+                        '08012345678',
+
+                    'delivery_state' =>
+                        'Lagos',
+
+                    'delivery_lga' =>
+                        'Ikeja',
+
+                    'delivery_address' =>
+                        '12 Allen Avenue, Ikeja',
+
+                    'delivery_notes' =>
+                        'Unit snapshot test',
+                ]
+            );
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath(
+                'data.items.0.unit',
+                'bag'
+            );
+
+        $orderId = $response->json(
+            'data.id'
+        );
+
+        $this->assertDatabaseHas(
+            'order_items',
+            [
+                'order_id' =>
+                    $orderId,
+
+                'listing_id' =>
+                    $listing->id,
+
+                'unit' =>
+                    'bag',
+
+                'quantity' =>
+                    2,
+            ]
+        );
+
+        /*
+         * Change the current marketplace listing.
+         */
+        $listing->update([
+            'unit' =>
+                'kg',
+        ]);
+
+        /*
+         * Historical order remains "bag".
+         */
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/orders/{$orderId}"
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.items.0.unit',
+                'bag'
+            );
+
+        $this->assertDatabaseHas(
+            'order_items',
+            [
+                'order_id' =>
+                    $orderId,
+
+                'unit' =>
+                    'bag',
+            ]
+        );
+    }
+
+    private function createListing(
+        string $unit
+    ): Listing {
+        $farmer = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        $category = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $produce = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        return Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                45000,
+
+            'unit' =>
+                $unit,
+
+            'stock' =>
+                100,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Listing\UserListingTest.php ---
+<?php
+
+namespace Tests\Feature\Listing;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class UserListingTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_public_can_fetch_active_listings(): void
+    {
+        $farmer = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        $category = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $produce = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                45000,
+
+            'stock' =>
+                50,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $beans = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Beans',
+
+            'image' =>
+                base64_encode('beans'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $beans->id,
+
+            'price' =>
+                40000,
+
+            'stock' =>
+                0,
+
+            'status' =>
+                ListingStatus::Inactive,
+        ]);
+
+        $response = $this->getJson(
+            '/api/v1/listings'
+        );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.produce.name',
+                'Rice'
+            )
+            ->assertJsonPath(
+                'data.0.farmer.name',
+                'Ibrahim Musa'
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                20
+            )
+            ->assertJsonPath(
+                'meta.total',
+                1
+            )
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id',
+                        'price',
+                        'stock',
+                        'status',
+
+                        'produce' => [
+                            'id',
+                            'name',
+                            'image_url',
+
+                            'category' => [
+                                'id',
+                                'name',
+                            ],
+                        ],
+
+                        'farmer' => [
+                            'id',
+                            'name',
+                            'state',
+                            'lga',
+                        ],
+                    ],
+                ],
+
+                'links' => [
+                    'first',
+                    'last',
+                    'prev',
+                    'next',
+                ],
+
+                'meta' => [
+                    'current_page',
+                    'from',
+                    'last_page',
+                    'links',
+                    'path',
+                    'per_page',
+                    'to',
+                    'total',
+                ],
+            ]);
+    }
+
+    public function test_public_can_get_one_active_listing(): void
+    {
+        [$listing] =
+            $this->seedListings();
+
+        $this
+            ->getJson(
+                "/api/v1/listings/{$listing->id}"
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.produce.name',
+                'Rice'
+            );
+    }
+
+    public function test_inactive_listing_returns_not_found(): void
+    {
+        $farmer = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        $category = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $produce = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        $listing = Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                45000,
+
+            'stock' =>
+                50,
+
+            'status' =>
+                ListingStatus::Inactive,
+        ]);
+
+        $this
+            ->getJson(
+                "/api/v1/listings/{$listing->id}"
+            )
+            ->assertNotFound()
+            ->assertJson([
+                'message' =>
+                    'Listing not found.',
+            ]);
+    }
+
+    public function test_public_can_search_and_filter_listings(): void
+    {
+        [
+            $riceListing,
+            $tomatoListing,
+        ] = $this->seedListings();
+
+        $this
+            ->getJson(
+                '/api/v1/listings?search=Rice'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+
+        $this
+            ->getJson(
+                '/api/v1/listings?category_id='
+                .$tomatoListing
+                    ->produce
+                    ->category_id
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $tomatoListing->id
+            );
+
+        $this
+            ->getJson(
+                '/api/v1/listings?farmer_id='
+                .$riceListing->farmer_id
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+    }
+
+    public function test_public_can_sort_listings_by_price_and_category(): void
+    {
+        $this->seedListings();
+
+        $byPrice = $this->getJson(
+            '/api/v1/listings?sort=price&order=asc'
+        );
+
+        $byPrice->assertOk();
+
+        $this->assertTrue(
+            $byPrice->json(
+                'data.0.price'
+            )
+            <=
+            $byPrice->json(
+                'data.1.price'
+            )
+        );
+
+        $byCategory = $this->getJson(
+            '/api/v1/listings?sort=category&order=asc'
+        );
+
+        $byCategory
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.produce.category.name',
+                'Grains'
+            )
+            ->assertJsonPath(
+                'data.1.produce.category.name',
+                'Vegetables'
+            );
+    }
+
+    public function test_public_listings_are_paginated(): void
+    {
+        [
+            $riceListing,
+            $tomatoListing,
+        ] = $this->seedListings();
+
+        /*
+         * Tomato costs less than rice, so with price ASC
+         * it should appear on page 1 when per_page = 1.
+         */
+        $pageOne = $this->getJson(
+            '/api/v1/listings'
+            .'?sort=price'
+            .'&order=asc'
+            .'&per_page=1'
+            .'&page=1'
+        );
+
+        $pageOne
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $tomatoListing->id
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.last_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.total',
+                2
+            );
+
+        /*
+         * Page 2 should contain the second listing.
+         */
+        $pageTwo = $this->getJson(
+            '/api/v1/listings'
+            .'?sort=price'
+            .'&order=asc'
+            .'&per_page=1'
+            .'&page=2'
+        );
+
+        $pageTwo
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.total',
+                2
+            );
+    }
+
+    public function test_pagination_preserves_listing_query_parameters(): void
+    {
+        $this->seedListings();
+
+        $response = $this->getJson(
+            '/api/v1/listings'
+            .'?sort=price'
+            .'&order=asc'
+            .'&per_page=1'
+        );
+
+        $response->assertOk();
+
+        $next = $response->json(
+            'links.next'
+        );
+
+        $this->assertNotNull(
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'sort=price',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'order=asc',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'per_page=1',
+            $next
+        );
+    }
+
+    public function test_per_page_cannot_exceed_one_hundred(): void
+    {
+        $this
+            ->getJson(
+                '/api/v1/listings?per_page=101'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'per_page',
+            ]);
+    }
+
+    public function test_page_must_be_at_least_one(): void
+    {
+        $this
+            ->getJson(
+                '/api/v1/listings?page=0'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'page',
+            ]);
+    }
+
+    /**
+     * @return array{0: Listing, 1: Listing}
+     */
+    private function seedListings(): array
+    {
+        $grainFarmer = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        $vegFarmer = Farmer::create([
+            'name' =>
+                'Ada Okoro',
+
+            'state' =>
+                'Lagos',
+
+            'lga' =>
+                'Ikeja',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08087654321',
+        ]);
+
+        $grains = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $vegetables = Category::create([
+            'name' =>
+                'Vegetables',
+        ]);
+
+        $rice = Produce::create([
+            'category_id' =>
+                $grains->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        $tomato = Produce::create([
+            'category_id' =>
+                $vegetables->id,
+
+            'name' =>
+                'Tomato',
+
+            'image' =>
+                base64_encode('tomato'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        $riceListing = Listing::create([
+            'farmer_id' =>
+                $grainFarmer->id,
+
+            'produce_id' =>
+                $rice->id,
+
+            'price' =>
+                45000,
+
+            'stock' =>
+                50,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $tomatoListing = Listing::create([
+            'farmer_id' =>
+                $vegFarmer->id,
+
+            'produce_id' =>
+                $tomato->id,
+
+            'price' =>
+                12000,
+
+            'stock' =>
+                80,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $tomatoListing->load(
+            'produce.category'
+        );
+
+        return [
+            $riceListing,
+            $tomatoListing,
+        ];
+    }
+}
+
+=== routes/api.php ===
+<?php
+
+use App\Http\Controllers\Api\V1\Admin\BuyerController;
+use App\Http\Controllers\Api\V1\Admin\CategoryController;
+use App\Http\Controllers\Api\V1\Admin\DashboardController;
+use App\Http\Controllers\Api\V1\Admin\DisputeController as AdminDisputeController;
+use App\Http\Controllers\Api\V1\Admin\FarmerController;
+use App\Http\Controllers\Api\V1\Admin\ListingController as AdminListingController;
+use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
+use App\Http\Controllers\Api\V1\Admin\ProduceController;
+use App\Http\Controllers\Api\V1\Admin\UserController;
+use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\DisputeController;
+use App\Http\Controllers\Api\V1\ListingController;
+use App\Http\Controllers\Api\V1\OrderController;
+use App\Http\Controllers\Api\V1\PaymentController;
+use App\Http\Middleware\EnsureUserIsActive;
+use Illuminate\Support\Facades\Route;
+
+Route::prefix('v1')->group(function () {
+    Route::get('/health', function () {
+        return response()->json([
+            'status' => 'ok',
+            'service' => config('app.name'),
+        ]);
+    });
+
+    Route::post(
+        '/register',
+        [AuthController::class, 'register']
+    );
+
+    Route::post(
+        '/login',
+        [AuthController::class, 'login']
+    );
+
+    Route::get(
+        'listings',
+        [ListingController::class, 'index']
+    );
+
+    Route::get(
+        'listings/{listing}',
+        [ListingController::class, 'show']
+    );
+
+    Route::middleware([
+        'auth:api',
+        EnsureUserIsActive::class,
+    ])
+        ->group(function () {
+            Route::get(
+                'me',
+                [AuthController::class, 'me']
+            );
+
+            Route::get(
+                'orders',
+                [OrderController::class, 'index']
+            );
+
+            Route::post(
+                'orders',
+                [OrderController::class, 'store']
+            );
+
+            Route::get(
+                'orders/{order}',
+                [OrderController::class, 'show']
+            );
+
+            Route::patch(
+                'orders/{order}/cancel',
+                [OrderController::class, 'cancel']
+            );
+
+            Route::post(
+                'orders/{order}/payment/initialize',
+                [
+                    PaymentController::class,
+                    'initialize',
+                ]
+            );
+
+            Route::post(
+                'orders/{order}/payment/verify',
+                [
+                    PaymentController::class,
+                    'verify',
+                ]
+            );
+
+            Route::get(
+                'disputes',
+                [DisputeController::class, 'index']
+            );
+
+            Route::post(
+                'disputes',
+                [DisputeController::class, 'store']
+            );
+
+            Route::get(
+                'disputes/{dispute}',
+                [DisputeController::class, 'show']
+            );
+
+            Route::post(
+                'disputes/{dispute}/messages',
+                [
+                    DisputeController::class,
+                    'storeMessage',
+                ]
+            );
+        });
+
+    Route::middleware([
+        'auth:api',
+        EnsureUserIsActive::class,
+        'admin',
+    ])
+        ->prefix('admin')
+        ->group(function () {
+            Route::get(
+                'dashboard',
+                DashboardController::class
+            );
+
+            Route::apiResource(
+                'categories',
+                CategoryController::class
+            );
+
+            Route::apiResource(
+                'produce',
+                ProduceController::class
+            );
+
+            Route::patch(
+                'farmers/{farmer}/status',
+                [
+                    FarmerController::class,
+                    'updateStatus',
+                ]
+            );
+
+            Route::patch(
+                'farmers/{farmer}/verification',
+                [
+                    FarmerController::class,
+                    'updateVerification',
+                ]
+            );
+
+            Route::apiResource(
+                'farmers',
+                FarmerController::class
+            );
+
+            Route::get(
+                'listings',
+                [
+                    AdminListingController::class,
+                    'all',
+                ]
+            );
+
+            Route::get(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'show',
+                ]
+            );
+
+            Route::put(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'update',
+                ]
+            );
+
+            Route::patch(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'update',
+                ]
+            );
+
+            Route::delete(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'destroy',
+                ]
+            );
+
+            Route::get(
+                'farmers/{farmer}/listings',
+                [
+                    AdminListingController::class,
+                    'index',
+                ]
+            );
+
+            Route::post(
+                'farmers/{farmer}/listings',
+                [
+                    AdminListingController::class,
+                    'store',
+                ]
+            );
+
+            Route::get(
+                'farmers/{farmer}/orders',
+                [
+                    AdminOrderController::class,
+                    'farmerIndex',
+                ]
+            );
+
+            Route::get(
+                'orders',
+                [
+                    AdminOrderController::class,
+                    'index',
+                ]
+            );
+
+            Route::get(
+                'orders/{order}',
+                [
+                    AdminOrderController::class,
+                    'show',
+                ]
+            );
+
+            Route::patch(
+                'orders/{order}',
+                [
+                    AdminOrderController::class,
+                    'update',
+                ]
+            );
+
+            Route::get(
+                'users',
+                [UserController::class, 'index']
+            );
+
+            Route::get(
+                'users/{user}',
+                [UserController::class, 'show']
+            );
+
+            Route::get(
+                'buyers',
+                [BuyerController::class, 'index']
+            );
+
+            Route::patch(
+                'buyers/{buyer}/status',
+                [
+                    BuyerController::class,
+                    'updateStatus',
+                ]
+            );
+
+            Route::get(
+                'buyers/{buyer}',
+                [BuyerController::class, 'show']
+            );
+
+            Route::get(
+                'disputes',
+                [
+                    AdminDisputeController::class,
+                    'index',
+                ]
+            );
+
+            Route::get(
+                'disputes/{dispute}',
+                [
+                    AdminDisputeController::class,
+                    'show',
+                ]
+            );
+
+            Route::post(
+                'disputes/{dispute}/messages',
+                [
+                    AdminDisputeController::class,
+                    'storeMessage',
+                ]
+            );
+
+            Route::patch(
+                'disputes/{dispute}',
+                [
+                    AdminDisputeController::class,
+                    'update',
+                ]
+            );
+        });
+});

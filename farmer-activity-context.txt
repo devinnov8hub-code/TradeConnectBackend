@@ -1,0 +1,6028 @@
+=== app/Models/Farmer.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+
+#[Fillable([
+    'name',
+    'email',
+    'state',
+    'lga',
+    'phone_number',
+    'address',
+    'gender',
+    'date_of_birth',
+    'farm_name',
+    'farm_size_hectares',
+    'farming_method',
+    'years_experience',
+    'farm_address',
+    'status',
+    'verification_status',
+    'verified_at',
+    'suspended_at',
+])]
+class Farmer extends Model
+{
+    protected $attributes = [
+        'verification_status' =>
+            'pending',
+    ];
+
+    protected static function booted(): void
+    {
+        static::created(
+            function (
+                Farmer $farmer
+            ): void {
+                /*
+                 * Generate the public farmer code from the
+                 * database ID so concurrent farmer creation
+                 * cannot generate the same code.
+                 */
+                if (! $farmer->farmer_code) {
+                    $farmer->forceFill([
+                        'farmer_code' =>
+                            'FAR-'
+                            .str_pad(
+                                (string) $farmer->id,
+                                6,
+                                '0',
+                                STR_PAD_LEFT
+                            ),
+                    ])->saveQuietly();
+                }
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'status' =>
+                FarmerStatus::class,
+
+            'verification_status' =>
+                FarmerVerificationStatus::class,
+
+            'date_of_birth' =>
+                'date',
+
+            'farm_size_hectares' =>
+                'decimal:2',
+
+            'years_experience' =>
+                'integer',
+
+            'verified_at' =>
+                'datetime',
+
+            'suspended_at' =>
+                'datetime',
+        ];
+    }
+
+    public function listings(): HasMany
+    {
+        return $this->hasMany(
+            Listing::class
+        );
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    /*
+     * Legacy relationship.
+     *
+     * New multi-item order reporting should use
+     * orderItems rather than relying on orders.listing_id.
+     */
+    public function orders(): HasManyThrough
+    {
+        return $this->hasManyThrough(
+            Order::class,
+            Listing::class
+        );
+    }
+
+    /*
+     * A farmer must satisfy both operational state and
+     * identity verification before a marketplace listing
+     * can become live.
+     */
+    public function canPublishListings(): bool
+    {
+        return $this->status
+                === FarmerStatus::Active
+            && $this->verification_status
+                === FarmerVerificationStatus::Verified;
+    }
+}
+
+=== app/Http/Resources/FarmerResource.php ===
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class FarmerResource extends JsonResource
+{
+    public function toArray(
+        Request $request
+    ): array {
+        return [
+            'id' =>
+                $this->id,
+
+            'farmer_code' =>
+                $this->farmer_code,
+
+            'name' =>
+                $this->name,
+
+            'email' =>
+                $this->email,
+
+            'phone_number' =>
+                $this->phone_number,
+
+            'state' =>
+                $this->state,
+
+            'lga' =>
+                $this->lga,
+
+            'address' =>
+                $this->address,
+
+            'gender' =>
+                $this->gender,
+
+            'date_of_birth' =>
+                $this->date_of_birth
+                    ?->toDateString(),
+
+            'status' =>
+                $this->status->value,
+
+            'verification_status' =>
+                $this
+                    ->verification_status
+                    ->value,
+
+            'farm' => [
+                'name' =>
+                    $this->farm_name,
+
+                'size_hectares' =>
+                    $this->farm_size_hectares,
+
+                'farming_method' =>
+                    $this->farming_method,
+
+                'years_experience' =>
+                    $this->years_experience,
+
+                'address' =>
+                    $this->farm_address,
+            ],
+
+            'listings_count' =>
+                $this->whenCounted(
+                    'listings'
+                ),
+
+            'verified_at' =>
+                $this->verified_at,
+
+            'suspended_at' =>
+                $this->suspended_at,
+
+            'created_at' =>
+                $this->created_at,
+
+            'updated_at' =>
+                $this->updated_at,
+        ];
+    }
+}
+
+=== Admin FarmerController ===
+<?php
+
+namespace App\Http\Controllers\Api\V1\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Admin\IndexFarmerRequest;
+use App\Http\Requests\Admin\StoreFarmerRequest;
+use App\Http\Requests\Admin\UpdateFarmerRequest;
+use App\Http\Requests\Admin\UpdateFarmerStatusRequest;
+use App\Http\Requests\Admin\UpdateFarmerVerificationRequest;
+use App\Http\Resources\FarmerResource;
+use App\Http\Resources\ListingResource;
+use App\Http\Resources\OrderResource;
+use App\Models\Farmer;
+use App\Models\Order;
+use App\Models\OrderItem;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
+
+class FarmerController extends Controller
+{
+    public function index(
+        IndexFarmerRequest $request
+    ): JsonResponse {
+        $sort = $request->validated(
+            'sort',
+            'name'
+        ) ?? 'name';
+
+        $order = $request->validated(
+            'order',
+            'asc'
+        ) ?? 'asc';
+
+        $perPage = (int) (
+            $request->validated(
+                'per_page',
+                20
+            ) ?? 20
+        );
+
+        $farmers = Farmer::query()
+            ->withCount('listings')
+            ->when(
+                $request->filled('search'),
+                function (
+                    Builder $query
+                ) use ($request): void {
+                    $search = '%'
+                        .$request->validated(
+                            'search'
+                        )
+                        .'%';
+
+                    $query->where(
+                        function (
+                            Builder $query
+                        ) use ($search): void {
+                            $query
+                                ->where(
+                                    'name',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'farmer_code',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'email',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'phone_number',
+                                    'like',
+                                    $search
+                                )
+                                ->orWhere(
+                                    'farm_name',
+                                    'like',
+                                    $search
+                                );
+                        }
+                    );
+                }
+            )
+            ->when(
+                $request->filled('state'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'state',
+                        $request->validated(
+                            'state'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled('lga'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'lga',
+                        $request->validated(
+                            'lga'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled('status'),
+                fn (Builder $query) =>
+                    $query->where(
+                        'status',
+                        $request->validated(
+                            'status'
+                        )
+                    )
+            )
+            ->when(
+                $request->filled(
+                    'verification_status'
+                ),
+                fn (Builder $query) =>
+                    $query->where(
+                        'verification_status',
+                        $request->validated(
+                            'verification_status'
+                        )
+                    )
+            )
+            ->orderBy(
+                $sort,
+                strtolower($order)
+                    === 'desc'
+                    ? 'desc'
+                    : 'asc'
+            )
+            ->paginate($perPage)
+            ->withQueryString();
+
+        return FarmerResource::collection(
+            $farmers
+        )->response();
+    }
+
+    public function store(
+        StoreFarmerRequest $request
+    ): JsonResponse {
+        $farmer = Farmer::create(
+            $request->validated()
+        );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource(
+                    $farmer
+                ),
+        ], 201);
+    }
+
+    public function show(
+        Farmer $farmer
+    ): JsonResponse {
+        $farmer
+            ->load([
+                'listings' =>
+                    fn ($query) =>
+                        $query
+                            ->with([
+                                'produce.category',
+                                'farmer',
+                            ])
+                            ->orderByDesc(
+                                'created_at'
+                            ),
+            ])
+            ->loadCount(
+                'listings'
+            );
+
+        $orders = Order::query()
+            ->whereHas(
+                'items',
+                fn (Builder $query) =>
+                    $query->where(
+                        'farmer_id',
+                        $farmer->id
+                    )
+            )
+            ->with([
+                'user',
+
+                'items.produce.category',
+                'items.farmer',
+
+                // Legacy compatibility.
+                'listing.produce.category',
+                'listing.farmer',
+            ])
+            ->orderByDesc(
+                'created_at'
+            )
+            ->get();
+
+        $ordersCount =
+            $orders->count();
+
+        $completedOrdersCount =
+            $orders
+                ->filter(
+                    fn (Order $order) =>
+                        $order->status
+                        === OrderStatus::Delivered
+                )
+                ->count();
+
+        $totalEarned =
+            OrderItem::query()
+                ->where(
+                    'farmer_id',
+                    $farmer->id
+                )
+                ->whereHas(
+                    'order',
+                    fn (Builder $query) =>
+                        $query->where(
+                            'payment_status',
+                            PaymentStatus::Paid
+                                ->value
+                        )
+                )
+                ->sum(
+                    'line_total'
+                );
+
+        $profile = (
+            new FarmerResource(
+                $farmer
+            )
+        )->toArray(
+            request()
+        );
+
+        return response()->json([
+            'data' => [
+                ...$profile,
+
+                'orders_count' =>
+                    $ordersCount,
+
+                'completed_orders_count' =>
+                    $completedOrdersCount,
+
+                'total_earned' =>
+                    number_format(
+                        (float) $totalEarned,
+                        2,
+                        '.',
+                        ''
+                    ),
+
+                'listings' =>
+                    ListingResource::collection(
+                        $farmer->listings
+                    ),
+
+                'orders' =>
+                    OrderResource::collection(
+                        $orders
+                    ),
+            ],
+        ]);
+    }
+
+    public function update(
+        UpdateFarmerRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $farmer->update(
+            $request->validated()
+        );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource(
+                    $farmer
+                ),
+        ]);
+    }
+
+    public function updateStatus(
+        UpdateFarmerStatusRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $status =
+            FarmerStatus::from(
+                $request->validated(
+                    'status'
+                )
+            );
+
+        DB::transaction(
+            function () use (
+                $farmer,
+                $status
+            ): void {
+                $farmer->forceFill([
+                    'status' =>
+                        $status,
+
+                    /*
+                     * Preserve the original suspension time
+                     * when the same inactive request is
+                     * repeated.
+                     */
+                    'suspended_at' =>
+                        $status
+                        === FarmerStatus::Inactive
+                            ? (
+                                $farmer
+                                    ->suspended_at
+                                ?? now()
+                            )
+                            : null,
+                ])->save();
+
+                $this
+                    ->unpublishListingsIfIneligible(
+                        $farmer
+                    );
+            }
+        );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource(
+                    $farmer
+                ),
+        ]);
+    }
+
+    public function updateVerification(
+        UpdateFarmerVerificationRequest $request,
+        Farmer $farmer
+    ): JsonResponse {
+        $verificationStatus =
+            FarmerVerificationStatus::from(
+                $request->validated(
+                    'verification_status'
+                )
+            );
+
+        DB::transaction(
+            function () use (
+                $farmer,
+                $verificationStatus
+            ): void {
+                $farmer->forceFill([
+                    'verification_status' =>
+                        $verificationStatus,
+
+                    /*
+                     * Preserve the original verification time
+                     * if "verified" is submitted repeatedly.
+                     *
+                     * Pending/rejected farmers are not
+                     * verified.
+                     */
+                    'verified_at' =>
+                        $verificationStatus
+                        === FarmerVerificationStatus::Verified
+                            ? (
+                                $farmer
+                                    ->verified_at
+                                ?? now()
+                            )
+                            : null,
+                ])->save();
+
+                $this
+                    ->unpublishListingsIfIneligible(
+                        $farmer
+                    );
+            }
+        );
+
+        $farmer->refresh();
+
+        return response()->json([
+            'data' =>
+                new FarmerResource(
+                    $farmer
+                ),
+        ]);
+    }
+
+    public function destroy(
+        Farmer $farmer
+    ): JsonResponse {
+        $farmer->delete();
+
+        return response()->json([
+            'message' =>
+                'Farmer deleted.',
+        ]);
+    }
+
+    private function unpublishListingsIfIneligible(
+        Farmer $farmer
+    ): void {
+        if (
+            $farmer
+                ->canPublishListings()
+        ) {
+            return;
+        }
+
+        /*
+         * Becoming inactive, pending, or rejected must
+         * immediately remove marketplace publication.
+         *
+         * Pending listings remain pending. Only currently
+         * live/active listings are forced inactive.
+         */
+        $farmer
+            ->listings()
+            ->where(
+                function (
+                    Builder $query
+                ): void {
+                    $query
+                        ->where(
+                            'publication_status',
+                            ListingPublicationStatus::Live
+                                ->value
+                        )
+                        ->orWhere(
+                            'status',
+                            ListingStatus::Active
+                                ->value
+                        );
+                }
+            )
+            ->update([
+                'publication_status' =>
+                    ListingPublicationStatus::Inactive
+                        ->value,
+
+                'status' =>
+                    ListingStatus::Inactive
+                        ->value,
+            ]);
+    }
+}
+
+=== Farmer requests ===
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerListingRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\ListingStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerListingRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'category_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                'exists:categories,id',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(ListingStatus::class),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'created_at',
+                    'price',
+                    'stock',
+                    'produce',
+                    'category',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'category_id.exists' =>
+                'Category not found.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'sort.in' =>
+                'Sort must be one of: created_at, price, stock, produce, category.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerOrderRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerOrderRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(OrderStatus::class),
+            ],
+
+            'payment_status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(PaymentStatus::class),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'created_at',
+                    'order_number',
+                    'total',
+                    'status',
+                    'payment_status',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.enum' =>
+                'Status must be new, in_transit, cancelled, or delivered.',
+
+            'payment_status.enum' =>
+                'Payment status must be pending, paid, failed, or refunded.',
+
+            'sort.in' =>
+                'Sort must be one of: created_at, order_number, total, status, payment_status.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\IndexFarmerRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class IndexFarmerRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'search' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'state' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'lga' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(FarmerStatus::class),
+            ],
+
+            'verification_status' => [
+                'sometimes',
+                'nullable',
+                Rule::enum(
+                    FarmerVerificationStatus::class
+                ),
+            ],
+
+            'sort' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'name',
+                    'farmer_code',
+                    'created_at',
+                    'listings_count',
+                ]),
+            ],
+
+            'order' => [
+                'sometimes',
+                'nullable',
+                'string',
+                Rule::in([
+                    'asc',
+                    'desc',
+                ]),
+            ],
+
+            'page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+            ],
+
+            'per_page' => [
+                'sometimes',
+                'integer',
+                'min:1',
+                'max:100',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'verification_status.enum' =>
+                'Verification status must be pending, verified, or rejected.',
+
+            'sort.in' =>
+                'Sort must be one of: name, farmer_code, created_at, listings_count.',
+
+            'order.in' =>
+                'Order must be asc or desc.',
+
+            'page.integer' =>
+                'Page must be an integer.',
+
+            'page.min' =>
+                'Page must be at least 1.',
+
+            'per_page.integer' =>
+                'Per page must be an integer.',
+
+            'per_page.min' =>
+                'Per page must be at least 1.',
+
+            'per_page.max' =>
+                'Per page cannot exceed 100.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\StoreFarmerRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class StoreFarmerRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'email' => [
+                'nullable',
+                'string',
+                'email',
+                'max:255',
+                'unique:farmers,email',
+            ],
+
+            'phone_number' => [
+                'required',
+                'string',
+                'max:20',
+            ],
+
+            'state' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'lga' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'gender' => [
+                'nullable',
+                'string',
+                'max:30',
+            ],
+
+            'date_of_birth' => [
+                'nullable',
+                'date',
+                'before_or_equal:today',
+            ],
+
+            'farm_name' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'farm_size_hectares' => [
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+
+            'farming_method' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'years_experience' => [
+                'nullable',
+                'integer',
+                'min:0',
+                'max:65535',
+            ],
+
+            'farm_address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'status' => [
+                'required',
+                Rule::enum(
+                    FarmerStatus::class
+                ),
+            ],
+
+            /*
+             * These are controlled by the backend.
+             */
+            'farmer_code' => [
+                'prohibited',
+            ],
+
+            'verification_status' => [
+                'prohibited',
+            ],
+
+            'verified_at' => [
+                'prohibited',
+            ],
+
+            'suspended_at' => [
+                'prohibited',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' =>
+                'Farmer name is required.',
+
+            'email.email' =>
+                'Email must be a valid email address.',
+
+            'email.unique' =>
+                'This email is already assigned to a farmer.',
+
+            'state.required' =>
+                'State is required.',
+
+            'lga.required' =>
+                'LGA is required.',
+
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'phone_number.required' =>
+                'Phone number is required.',
+
+            'date_of_birth.before_or_equal' =>
+                'Date of birth cannot be in the future.',
+
+            'farm_size_hectares.min' =>
+                'Farm size cannot be negative.',
+
+            'years_experience.min' =>
+                'Years of experience cannot be negative.',
+
+            'farmer_code.prohibited' =>
+                'Farmer code is generated by the server.',
+
+            'verification_status.prohibited' =>
+                'Verification status cannot be assigned through farmer creation.',
+        ];
+    }
+
+    public function attributes(): array
+    {
+        return [
+            'lga' =>
+                'LGA',
+
+            'phone_number' =>
+                'phone number',
+
+            'farm_size_hectares' =>
+                'farm size',
+
+            'years_experience' =>
+                'years of experience',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateFarmerRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateFarmerRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        /** @var \App\Models\Farmer $farmer */
+        $farmer = $this->route('farmer');
+
+        return [
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'email' => [
+                'nullable',
+                'string',
+                'email',
+                'max:255',
+
+                Rule::unique(
+                    'farmers',
+                    'email'
+                )->ignore($farmer),
+            ],
+
+            'phone_number' => [
+                'required',
+                'string',
+                'max:20',
+            ],
+
+            'state' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'lga' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'gender' => [
+                'nullable',
+                'string',
+                'max:30',
+            ],
+
+            'date_of_birth' => [
+                'nullable',
+                'date',
+                'before_or_equal:today',
+            ],
+
+            'farm_name' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'farm_size_hectares' => [
+                'nullable',
+                'numeric',
+                'min:0',
+            ],
+
+            'farming_method' => [
+                'nullable',
+                'string',
+                'max:255',
+            ],
+
+            'years_experience' => [
+                'nullable',
+                'integer',
+                'min:0',
+                'max:65535',
+            ],
+
+            'farm_address' => [
+                'nullable',
+                'string',
+                'max:1000',
+            ],
+
+            'status' => [
+                'required',
+                Rule::enum(
+                    FarmerStatus::class
+                ),
+            ],
+
+            'farmer_code' => [
+                'prohibited',
+            ],
+
+            'verification_status' => [
+                'prohibited',
+            ],
+
+            'verified_at' => [
+                'prohibited',
+            ],
+
+            'suspended_at' => [
+                'prohibited',
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' =>
+                'Farmer name is required.',
+
+            'email.email' =>
+                'Email must be a valid email address.',
+
+            'email.unique' =>
+                'This email is already assigned to a farmer.',
+
+            'state.required' =>
+                'State is required.',
+
+            'lga.required' =>
+                'LGA is required.',
+
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+
+            'phone_number.required' =>
+                'Phone number is required.',
+
+            'date_of_birth.before_or_equal' =>
+                'Date of birth cannot be in the future.',
+
+            'farm_size_hectares.min' =>
+                'Farm size cannot be negative.',
+
+            'years_experience.min' =>
+                'Years of experience cannot be negative.',
+
+            'farmer_code.prohibited' =>
+                'Farmer code cannot be changed.',
+
+            'verification_status.prohibited' =>
+                'Use the farmer verification workflow to change verification status.',
+        ];
+    }
+
+    public function attributes(): array
+    {
+        return [
+            'lga' =>
+                'LGA',
+
+            'phone_number' =>
+                'phone number',
+
+            'farm_size_hectares' =>
+                'farm size',
+
+            'years_experience' =>
+                'years of experience',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateFarmerStatusRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateFarmerStatusRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'status' => [
+                'required',
+                Rule::enum(FarmerStatus::class),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be active or inactive.',
+        ];
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\app\Http\Requests\Admin\UpdateFarmerVerificationRequest.php ---
+<?php
+
+namespace App\Http\Requests\Admin;
+
+use App\Enums\FarmerVerificationStatus;
+use App\Http\Requests\ApiFormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateFarmerVerificationRequest extends ApiFormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'verification_status' => [
+                'required',
+                Rule::enum(
+                    FarmerVerificationStatus::class
+                ),
+            ],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'verification_status.required' =>
+                'Verification status is required.',
+
+            'verification_status.enum' =>
+                'Verification status must be pending, verified, or rejected.',
+        ];
+    }
+}
+
+=== app/Models/OrderItem.php ===
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+#[Fillable([
+    'order_id',
+    'listing_id',
+    'farmer_id',
+    'produce_id',
+    'produce_name',
+    'category_name',
+    'unit',
+    'quantity',
+    'unit_price',
+    'discount_amount',
+    'line_total',
+])]
+class OrderItem extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'unit_price' => 'decimal:2',
+            'discount_amount' => 'decimal:2',
+            'line_total' => 'decimal:2',
+        ];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
+    }
+
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(Listing::class);
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(Farmer::class);
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(Produce::class);
+    }
+}
+
+=== app/Models/Order.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+#[Fillable([
+    'user_id',
+
+    // Legacy single-item fields.
+    'listing_id',
+    'quantity',
+
+    'order_number',
+    'subtotal',
+    'delivery_fee',
+    'total',
+
+    'status',
+
+    'payment_status',
+    'payment_provider',
+    'payment_reference',
+    'payment_access_code',
+    'payment_authorization_url',
+
+    'delivery_method',
+    'delivery_name',
+    'delivery_phone',
+    'delivery_state',
+    'delivery_lga',
+    'delivery_address',
+    'delivery_notes',
+
+    'placed_at',
+    'confirmed_at',
+    'processing_at',
+    'out_for_delivery_at',
+    'deliver_by',
+    'delivered_at',
+    'cancelled_at',
+
+    'paid_at',
+    'payment_failed_at',
+    'refunded_at',
+])]
+class Order extends Model
+{
+    protected static function booted(): void
+    {
+        /*
+         * Every newly-created order begins its
+         * append-only status timeline here.
+         */
+        static::created(
+            function (Order $order): void {
+                $order->recordStatusEvent(
+                    null,
+                    $order->status
+                );
+            }
+        );
+
+        /*
+         * Capture status transitions regardless of
+         * whether they originate from the admin
+         * workflow or buyer cancellation workflow.
+         */
+        static::updated(
+            function (Order $order): void {
+                if (
+                    ! $order->wasChanged(
+                        'status'
+                    )
+                ) {
+                    return;
+                }
+
+                $previous =
+                    $order->getPrevious();
+
+                $previousStatus =
+                    $previous['status']
+                    ?? null;
+
+                if (
+                    $previousStatus
+                    instanceof OrderStatus
+                ) {
+                    $fromStatus =
+                        $previousStatus;
+                } elseif (
+                    $previousStatus !== null
+                ) {
+                    $fromStatus =
+                        OrderStatus::tryFrom(
+                            (string)
+                                $previousStatus
+                        );
+                } else {
+                    $fromStatus = null;
+                }
+
+                $order->recordStatusEvent(
+                    $fromStatus,
+                    $order->status
+                );
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'subtotal' =>
+                'decimal:2',
+
+            'delivery_fee' =>
+                'decimal:2',
+
+            'total' =>
+                'decimal:2',
+
+            'status' =>
+                OrderStatus::class,
+
+            'payment_status' =>
+                PaymentStatus::class,
+
+            'placed_at' =>
+                'datetime',
+
+            'confirmed_at' =>
+                'datetime',
+
+            'processing_at' =>
+                'datetime',
+
+            'out_for_delivery_at' =>
+                'datetime',
+
+            'deliver_by' =>
+                'datetime',
+
+            'delivered_at' =>
+                'datetime',
+
+            'cancelled_at' =>
+                'datetime',
+
+            'paid_at' =>
+                'datetime',
+
+            'payment_failed_at' =>
+                'datetime',
+
+            'refunded_at' =>
+                'datetime',
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(
+            User::class
+        );
+    }
+
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(
+            Listing::class
+        );
+    }
+
+    public function items(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    public function statusEvents(): HasMany
+    {
+        return $this
+            ->hasMany(
+                OrderStatusEvent::class
+            )
+            ->orderBy(
+                'occurred_at'
+            )
+            ->orderBy('id');
+    }
+
+    public function dispute(): HasOne
+    {
+        return $this->hasOne(
+            Dispute::class
+        );
+    }
+
+    public function isCancellable(): bool
+    {
+        /*
+         * Until refund support exists, a paid
+         * order must not be cancelled directly.
+         */
+        return $this->status
+                === OrderStatus::New
+            && $this->payment_status
+                !== PaymentStatus::Paid;
+    }
+
+    private function recordStatusEvent(
+        ?OrderStatus $fromStatus,
+        OrderStatus $toStatus
+    ): void {
+        $occurredAt = match (
+            $toStatus
+        ) {
+            OrderStatus::New =>
+                $this->placed_at
+                ?? $this->created_at
+                ?? now(),
+
+            OrderStatus::InTransit =>
+                $this->out_for_delivery_at
+                ?? now(),
+
+            OrderStatus::Delivered =>
+                $this->delivered_at
+                ?? now(),
+
+            OrderStatus::Cancelled =>
+                $this->cancelled_at
+                ?? now(),
+        };
+
+        /*
+         * The currently-authenticated API user is
+         * the actor for HTTP-driven changes.
+         *
+         * Console jobs or other system processes
+         * naturally produce a null actor.
+         */
+        $actorId = auth('api')->id();
+
+        $this
+            ->statusEvents()
+            ->create([
+                'from_status' =>
+                    $fromStatus,
+
+                'to_status' =>
+                    $toStatus,
+
+                'changed_by_user_id' =>
+                    $actorId,
+
+                'note' =>
+                    null,
+
+                'occurred_at' =>
+                    $occurredAt,
+            ]);
+    }
+}
+
+=== app/Http/Resources/OrderResource.php ===
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class OrderResource extends JsonResource
+{
+    public function toArray(
+        Request $request
+    ): array {
+        /*
+         * These legacy relationships remain temporarily because
+         * some older parts of the API still expect a single listing
+         * attached directly to an order.
+         */
+        $legacyListing =
+            $this->relationLoaded(
+                'listing'
+            )
+                ? $this->listing
+                : null;
+
+        $legacyProduce =
+            $legacyListing
+                ?->relationLoaded(
+                    'produce'
+                )
+                ? $legacyListing->produce
+                : null;
+
+        $legacyFarmer =
+            $legacyListing
+                ?->relationLoaded(
+                    'farmer'
+                )
+                ? $legacyListing->farmer
+                : null;
+
+        return [
+            'id' =>
+                $this->id,
+
+            'order_number' =>
+                $this->order_number
+                ?? 'ORD-'.str_pad(
+                    (string) $this->id,
+                    6,
+                    '0',
+                    STR_PAD_LEFT
+                ),
+
+            'user_id' =>
+                $this->user_id,
+
+            /*
+             * Temporary compatibility fields.
+             *
+             * For new multi-item orders these correspond to the
+             * first item only. New frontend code should use items[].
+             */
+            'listing_id' =>
+                $this->listing_id,
+
+            'quantity' =>
+                $this->quantity,
+
+            'subtotal' =>
+                $this->subtotal
+                ?? $this->total,
+
+            'delivery_fee' =>
+                $this->delivery_fee
+                ?? '0.00',
+
+            'total' =>
+                $this->total,
+
+            'status' =>
+                $this->status->value,
+
+            'payment_status' =>
+                $this->payment_status
+                ?? 'pending',
+
+            'delivery' => [
+                'method' =>
+                    $this->delivery_method,
+
+                'name' =>
+                    $this->delivery_name,
+
+                'phone' =>
+                    $this->delivery_phone,
+
+                'state' =>
+                    $this->delivery_state,
+
+                'lga' =>
+                    $this->delivery_lga,
+
+                'address' =>
+                    $this->delivery_address,
+
+                'notes' =>
+                    $this->delivery_notes,
+            ],
+
+            'items' =>
+                OrderItemResource::collection(
+                    $this->whenLoaded(
+                        'items'
+                    )
+                ),
+
+            /*
+             * Only detail endpoints load this relation.
+             *
+             * Order list responses therefore remain compact.
+             */
+            'timeline' =>
+                OrderStatusEventResource::collection(
+                    $this->whenLoaded(
+                        'statusEvents'
+                    )
+                ),
+
+            'buyer_name' =>
+                $this->when(
+                    $this->relationLoaded(
+                        'user'
+                    )
+                    && $this->user,
+                    fn () =>
+                        $this->user->name,
+                ),
+
+            'buyer' =>
+                $this->when(
+                    $this->relationLoaded(
+                        'user'
+                    )
+                    && $this->user,
+                    fn () => [
+                        'id' =>
+                            $this->user->id,
+
+                        'name' =>
+                            $this->user->name,
+
+                        'email' =>
+                            $this->user->email,
+                    ],
+                ),
+
+            /*
+             * Legacy single-item representation.
+             *
+             * Kept temporarily so older API consumers do not
+             * immediately break.
+             */
+            'produce' =>
+                $this->when(
+                    $legacyProduce
+                        !== null,
+                    fn () => [
+                        'id' =>
+                            $legacyProduce->id,
+
+                        'name' =>
+                            $legacyProduce->name,
+
+                        'image_url' =>
+                            $legacyProduce
+                                ->image_url,
+
+                        'category' => [
+                            'id' =>
+                                $legacyProduce
+                                    ->category?->id,
+
+                            'name' =>
+                                $legacyProduce
+                                    ->category?->name,
+                        ],
+                    ],
+                ),
+
+            'farmer' =>
+                $this->when(
+                    $legacyFarmer
+                        !== null,
+                    fn () => [
+                        'id' =>
+                            $legacyFarmer->id,
+
+                        'name' =>
+                            $legacyFarmer->name,
+
+                        'state' =>
+                            $legacyFarmer->state,
+
+                        'lga' =>
+                            $legacyFarmer->lga,
+
+                        'phone_number' =>
+                            $legacyFarmer
+                                ->phone_number,
+                    ],
+                ),
+
+            'placed_at' =>
+                $this->placed_at,
+
+            'confirmed_at' =>
+                $this->confirmed_at,
+
+            'processing_at' =>
+                $this->processing_at,
+
+            'out_for_delivery_at' =>
+                $this->out_for_delivery_at,
+
+            'deliver_by' =>
+                $this->deliver_by,
+
+            'delivered_at' =>
+                $this->delivered_at,
+
+            'cancelled_at' =>
+                $this->cancelled_at,
+
+            'created_at' =>
+                $this->created_at,
+
+            'updated_at' =>
+                $this->updated_at,
+        ];
+    }
+}
+
+=== app/Models/Listing.php ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+#[Fillable([
+    'farmer_id',
+    'produce_id',
+
+    'price',
+    'original_price',
+    'discount_percent',
+
+    'unit',
+    'stock',
+    'minimum_order_quantity',
+
+    'description',
+    'label',
+    'grade',
+    'available_from',
+
+    /*
+     * status remains temporarily for legacy
+     * active/inactive compatibility.
+     */
+    'status',
+
+    'publication_status',
+])]
+class Listing extends Model
+{
+    /*
+     * Listing images are part of the standard listing
+     * representation. Eager loading here prevents an
+     * N+1 problem across marketplace/admin pages.
+     */
+    protected $with = [
+        'images',
+    ];
+
+    protected static function booted(): void
+    {
+        static::saving(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->synchronisePublicationState();
+
+                $listing
+                    ->synchroniseDiscount();
+            }
+        );
+
+        /*
+         * Database cascading removes image rows, but
+         * the actual files live outside the database.
+         *
+         * Delete child models explicitly so their
+         * filesystem cleanup event runs.
+         */
+        static::deleting(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->images()
+                    ->get()
+                    ->each(
+                        fn (
+                            ListingImage $image
+                        ) =>
+                            $image->delete()
+                    );
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'price' =>
+                'decimal:2',
+
+            'original_price' =>
+                'decimal:2',
+
+            'discount_percent' =>
+                'decimal:2',
+
+            'minimum_order_quantity' =>
+                'decimal:2',
+
+            'available_from' =>
+                'date',
+
+            'status' =>
+                ListingStatus::class,
+
+            'publication_status' =>
+                ListingPublicationStatus::class,
+
+            'published_at' =>
+                'datetime',
+        ];
+    }
+
+    /*
+     * Legacy single-listing order relationship.
+     */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(
+            Order::class
+        );
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    public function images(): HasMany
+    {
+        return $this
+            ->hasMany(
+                ListingImage::class
+            )
+            ->orderBy(
+                'position'
+            )
+            ->orderBy('id');
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(
+            Farmer::class
+        );
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(
+            Produce::class
+        );
+    }
+
+    public function isAvailable(): bool
+    {
+        if (
+            $this->publication_status
+            !== ListingPublicationStatus::Live
+        ) {
+            return false;
+        }
+
+        if (
+            $this->status
+            !== ListingStatus::Active
+        ) {
+            return false;
+        }
+
+        if (
+            $this->available_from !== null
+            && $this
+                ->available_from
+                ->gt(
+                    now()
+                        ->startOfDay()
+                )
+        ) {
+            return false;
+        }
+
+        return (float) $this->stock
+            >= (float) $this
+                ->minimum_order_quantity;
+    }
+
+    private function synchronisePublicationState(): void
+    {
+        if (! $this->exists) {
+            $attributes =
+                $this->getAttributes();
+
+            $publicationProvided =
+                array_key_exists(
+                    'publication_status',
+                    $attributes
+                )
+                && $attributes[
+                    'publication_status'
+                ] !== null;
+
+            if ($publicationProvided) {
+                $this
+                    ->synchroniseLegacyStatusFromPublication();
+            } elseif (
+                array_key_exists(
+                    'status',
+                    $attributes
+                )
+                && $attributes[
+                    'status'
+                ] !== null
+            ) {
+                $this
+                    ->synchronisePublicationFromLegacyStatus();
+            } else {
+                $this->publication_status =
+                    ListingPublicationStatus::Pending;
+
+                $this->status =
+                    ListingStatus::Inactive;
+            }
+        } elseif (
+            $this->isDirty(
+                'publication_status'
+            )
+        ) {
+            $this
+                ->synchroniseLegacyStatusFromPublication();
+        } elseif (
+            $this->isDirty(
+                'status'
+            )
+        ) {
+            $this
+                ->synchronisePublicationFromLegacyStatus();
+        }
+
+        if (
+            $this->publication_status
+                === ListingPublicationStatus::Live
+            && $this->published_at
+                === null
+        ) {
+            $this->published_at =
+                now();
+        }
+    }
+
+    private function synchroniseLegacyStatusFromPublication(): void
+    {
+        $this->status =
+            $this->publication_status
+                === ListingPublicationStatus::Live
+                    ? ListingStatus::Active
+                    : ListingStatus::Inactive;
+    }
+
+    private function synchronisePublicationFromLegacyStatus(): void
+    {
+        $this->publication_status =
+            $this->status
+                === ListingStatus::Active
+                    ? ListingPublicationStatus::Live
+                    : ListingPublicationStatus::Inactive;
+    }
+
+    private function synchroniseDiscount(): void
+    {
+        if (
+            $this->original_price === null
+        ) {
+            $this->discount_percent =
+                null;
+
+            return;
+        }
+
+        $originalPrice =
+            (float) $this
+                ->original_price;
+
+        $currentPrice =
+            (float) $this->price;
+
+        if (
+            $originalPrice <= 0
+        ) {
+            $this->discount_percent =
+                '0.00';
+
+            return;
+        }
+
+        $discount =
+            (
+                (
+                    $originalPrice
+                    - $currentPrice
+                )
+                / $originalPrice
+            )
+            * 100;
+
+        $this->discount_percent =
+            number_format(
+                max(
+                    0,
+                    round(
+                        $discount,
+                        2
+                    )
+                ),
+                2,
+                '.',
+                ''
+            );
+    }
+}
+
+=== app/Http/Resources/ListingResource.php ===
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class ListingResource extends JsonResource
+{
+    public function toArray(
+        Request $request
+    ): array {
+        $discountAmount =
+            '0.00';
+
+        if (
+            $this->original_price
+            !== null
+            && bccomp(
+                (string)
+                    $this->original_price,
+                (string)
+                    $this->price,
+                2
+            ) === 1
+        ) {
+            $discountAmount =
+                bcsub(
+                    (string)
+                        $this->original_price,
+                    (string)
+                        $this->price,
+                    2
+                );
+        }
+
+        /*
+         * Ordered listing-specific imagery takes
+         * priority over the legacy global produce
+         * image.
+         */
+        $primaryImageUrl =
+            $this
+                ->images
+                ->first()
+                ?->url
+            ?? $this
+                ->produce
+                ->image_url;
+
+        return [
+            'id' =>
+                $this->id,
+
+            'farmer_id' =>
+                $this->farmer_id,
+
+            'produce_id' =>
+                $this->produce_id,
+
+            'price' =>
+                $this->price,
+
+            'original_price' =>
+                $this->original_price,
+
+            'discount_percent' =>
+                $this->discount_percent,
+
+            'discount_amount' =>
+                $discountAmount,
+
+            'unit' =>
+                $this->unit,
+
+            'stock' =>
+                $this->stock,
+
+            'minimum_order_quantity' =>
+                $this->minimum_order_quantity,
+
+            'description' =>
+                $this->description,
+
+            'label' =>
+                $this->label,
+
+            'grade' =>
+                $this->grade,
+
+            'available_from' =>
+                $this
+                    ->available_from
+                    ?->toDateString(),
+
+            'is_available' =>
+                $this->isAvailable(),
+
+            'status' =>
+                $this
+                    ->status
+                    ->value,
+
+            'publication_status' =>
+                $this
+                    ->publication_status
+                    ->value,
+
+            'published_at' =>
+                $this->published_at,
+
+            /*
+             * Preferred new marketplace imagery.
+             */
+            'primary_image_url' =>
+                $primaryImageUrl,
+
+            'images' =>
+                ListingImageResource::collection(
+                    $this->images
+                ),
+
+            'produce' => [
+                'id' =>
+                    $this
+                        ->produce
+                        ->id,
+
+                'name' =>
+                    $this
+                        ->produce
+                        ->name,
+
+                /*
+                 * Legacy catalog image remains available
+                 * during frontend migration.
+                 */
+                'image_url' =>
+                    $this
+                        ->produce
+                        ->image_url,
+
+                'category' => [
+                    'id' =>
+                        $this
+                            ->produce
+                            ->category
+                            ->id,
+
+                    'name' =>
+                        $this
+                            ->produce
+                            ->category
+                            ->name,
+                ],
+            ],
+
+            'farmer' => [
+                'id' =>
+                    $this
+                        ->farmer
+                        ->id,
+
+                'name' =>
+                    $this
+                        ->farmer
+                        ->name,
+
+                'state' =>
+                    $this
+                        ->farmer
+                        ->state,
+
+                'lga' =>
+                    $this
+                        ->farmer
+                        ->lga,
+            ],
+
+            'created_at' =>
+                $this->created_at,
+
+            'updated_at' =>
+                $this->updated_at,
+        ];
+    }
+}
+
+=== Farmer-related tests ===
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerIndexTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Enums\ListingStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerIndexTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' =>
+                UserRole::Admin,
+        ]);
+
+        return auth('api')->login(
+            $admin
+        );
+    }
+
+    public function test_admin_can_get_paginated_farmer_list(): void
+    {
+        $token = $this->adminToken();
+
+        Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        Farmer::create([
+            'name' =>
+                'Ada Okoro',
+
+            'state' =>
+                'Lagos',
+
+            'lga' =>
+                'Ikeja',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Pending,
+
+            'phone_number' =>
+                '08087654321',
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?per_page=1'
+                .'&page=1'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.last_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.total',
+                2
+            )
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id',
+                        'farmer_code',
+                        'name',
+                        'state',
+                        'lga',
+                        'status',
+                        'verification_status',
+                        'listings_count',
+                    ],
+                ],
+
+                'links' => [
+                    'first',
+                    'last',
+                    'prev',
+                    'next',
+                ],
+
+                'meta' => [
+                    'current_page',
+                    'from',
+                    'last_page',
+                    'links',
+                    'path',
+                    'per_page',
+                    'to',
+                    'total',
+                ],
+            ]);
+    }
+
+    public function test_admin_can_search_farmers(): void
+    {
+        $token = $this->adminToken();
+
+        $ibrahim = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'email' =>
+                'ibrahim@example.com',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'farm_name' =>
+                'Musa Farms',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        Farmer::create([
+            'name' =>
+                'Ada Okoro',
+
+            'email' =>
+                'ada@example.com',
+
+            'state' =>
+                'Lagos',
+
+            'lga' =>
+                'Ikeja',
+
+            'farm_name' =>
+                'Ada Green Farms',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Pending,
+
+            'phone_number' =>
+                '08087654321',
+        ]);
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?search=Ibrahim'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $ibrahim->id
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?search=Musa%20Farms'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $ibrahim->id
+            );
+    }
+
+    public function test_admin_can_filter_farmers_by_location_and_status(): void
+    {
+        $token = $this->adminToken();
+
+        $expected = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        Farmer::create([
+            'name' =>
+                'Sani Bello',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Minna',
+
+            'status' =>
+                FarmerStatus::Inactive,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08011111111',
+        ]);
+
+        Farmer::create([
+            'name' =>
+                'Ada Okoro',
+
+            'state' =>
+                'Lagos',
+
+            'lga' =>
+                'Ikeja',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Pending,
+
+            'phone_number' =>
+                '08087654321',
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?state=Niger'
+                .'&lga=Bida'
+                .'&status=active'
+                .'&verification_status=verified'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $expected->id
+            );
+    }
+
+    public function test_farmer_list_includes_listing_count(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        $category = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $rice = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        $maize = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Maize',
+
+            'image' =>
+                base64_encode('maize'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $rice->id,
+
+            'price' =>
+                45000,
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                50,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $maize->id,
+
+            'price' =>
+                30000,
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                30,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $farmer->id
+            )
+            ->assertJsonPath(
+                'data.0.listings_count',
+                2
+            );
+    }
+
+    public function test_admin_can_sort_farmers_by_listing_count(): void
+    {
+        $token = $this->adminToken();
+
+        $farmerWithNoListings =
+            Farmer::create([
+                'name' =>
+                    'Ada Okoro',
+
+                'state' =>
+                    'Lagos',
+
+                'lga' =>
+                    'Ikeja',
+
+                'status' =>
+                    FarmerStatus::Active,
+
+                'verification_status' =>
+                    FarmerVerificationStatus::Pending,
+
+                'phone_number' =>
+                    '08087654321',
+            ]);
+
+        $farmerWithListing =
+            Farmer::create([
+                'name' =>
+                    'Ibrahim Musa',
+
+                'state' =>
+                    'Niger',
+
+                'lga' =>
+                    'Bida',
+
+                'status' =>
+                    FarmerStatus::Active,
+
+                'verification_status' =>
+                    FarmerVerificationStatus::Verified,
+
+                'phone_number' =>
+                    '08012345678',
+            ]);
+
+        $category = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $produce = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        Listing::create([
+            'farmer_id' =>
+                $farmerWithListing->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                45000,
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                50,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?sort=listings_count'
+                .'&order=desc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $farmerWithListing->id
+            )
+            ->assertJsonPath(
+                'data.0.listings_count',
+                1
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $farmerWithNoListings->id
+            )
+            ->assertJsonPath(
+                'data.1.listings_count',
+                0
+            );
+    }
+
+    public function test_farmer_pagination_preserves_filters(): void
+    {
+        $token = $this->adminToken();
+
+        Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+
+        Farmer::create([
+            'name' =>
+                'Sani Bello',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Minna',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'phone_number' =>
+                '08011111111',
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?state=Niger'
+                .'&status=active'
+                .'&per_page=1'
+            );
+
+        $response->assertOk();
+
+        $next = $response->json(
+            'links.next'
+        );
+
+        $this->assertNotNull($next);
+
+        $this->assertStringContainsString(
+            'state=Niger',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'status=active',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'per_page=1',
+            $next
+        );
+    }
+
+    public function test_invalid_farmer_filters_are_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                '/api/v1/admin/farmers'
+                .'?status=blocked'
+                .'&verification_status=unknown'
+                .'&per_page=101'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'status',
+                'verification_status',
+                'per_page',
+            ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerListingIndexTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerListingIndexTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' => UserRole::Admin,
+        ]);
+
+        return auth('api')->login($admin);
+    }
+
+    public function test_admin_can_get_paginated_listings_for_one_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $otherFarmer = $this->createFarmer(
+            'Ada Okoro'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $maize,
+            30000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        /*
+         * Must not appear because this belongs
+         * to another farmer.
+         */
+        $this->createListing(
+            $otherFarmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?per_page=1'
+                .'&page=1'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.last_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.total',
+                2
+            )
+            ->assertJsonPath(
+                'data.0.farmer_id',
+                $farmer->id
+            )
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id',
+                        'farmer_id',
+                        'produce_id',
+                        'price',
+                        'unit',
+                        'stock',
+                        'status',
+                        'produce',
+                        'farmer',
+                    ],
+                ],
+
+                'links' => [
+                    'first',
+                    'last',
+                    'prev',
+                    'next',
+                ],
+
+                'meta' => [
+                    'current_page',
+                    'from',
+                    'last_page',
+                    'links',
+                    'path',
+                    'per_page',
+                    'to',
+                    'total',
+                ],
+            ]);
+    }
+
+    public function test_admin_can_search_farmer_listings(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?search=Rice'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?search=Grains'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            );
+    }
+
+    public function test_admin_can_filter_farmer_listings_by_category_and_status(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Inactive
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?category_id='
+                .$rice->category_id
+                .'&status=active'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceListing->id
+            )
+            ->assertJsonPath(
+                'data.0.status',
+                'active'
+            );
+    }
+
+    public function test_admin_can_sort_farmer_listings_by_price(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $expensive = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $cheap = $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?sort=price'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $cheap->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $expensive->id
+            );
+    }
+
+    public function test_admin_can_sort_farmer_listings_by_category(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $grainListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $vegetableListing = $this->createListing(
+            $farmer,
+            $tomato,
+            12000,
+            'basket',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?sort=category'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $grainListing->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $vegetableListing->id
+            );
+    }
+
+    public function test_farmer_listing_pagination_preserves_filters(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $this->createListing(
+            $farmer,
+            $rice,
+            45000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $this->createListing(
+            $farmer,
+            $maize,
+            30000,
+            'bag',
+            ListingStatus::Active
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?status=active'
+                .'&sort=price'
+                .'&order=asc'
+                .'&per_page=1'
+            );
+
+        $response->assertOk();
+
+        $next = $response->json(
+            'links.next'
+        );
+
+        $this->assertNotNull(
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'status=active',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'sort=price',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'order=asc',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'per_page=1',
+            $next
+        );
+    }
+
+    public function test_invalid_farmer_listing_filters_are_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa'
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/listings"
+                .'?status=pending'
+                .'&sort=unknown'
+                .'&per_page=101'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'status',
+                'sort',
+                'per_page',
+            ]);
+    }
+
+    private function createFarmer(
+        string $name
+    ): Farmer {
+        return Farmer::create([
+            'name' =>
+                $name,
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+    }
+
+    private function createProduce(
+        string $name,
+        string $categoryName
+    ): Produce {
+        /*
+         * More than one produce can belong to the same
+         * category. Reuse it instead of trying to insert
+         * another category with the same unique name.
+         */
+        $category = Category::firstOrCreate([
+            'name' =>
+                $categoryName,
+        ]);
+
+        return Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                $name,
+
+            'image' =>
+                base64_encode(
+                    strtolower($name)
+                ),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+    }
+
+    private function createListing(
+        Farmer $farmer,
+        Produce $produce,
+        int $price,
+        string $unit,
+        ListingStatus $status
+    ): Listing {
+        return Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                $price,
+
+            'unit' =>
+                $unit,
+
+            'stock' =>
+                50,
+
+            'status' =>
+                $status,
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerOrderIndexTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Order;
+use App\Models\OrderItem;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerOrderIndexTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' =>
+                UserRole::Admin,
+        ]);
+
+        return auth('api')->login(
+            $admin
+        );
+    }
+
+    public function test_admin_can_get_paginated_orders_for_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $otherFarmer = $this->createFarmer(
+            'Ada Okoro',
+            '08022222222'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000
+        );
+
+        $tomatoListing = $this->createListing(
+            $otherFarmer,
+            $tomato,
+            12000
+        );
+
+        $this->createOrder(
+            $buyer,
+            $riceListing,
+            $farmer,
+            $rice,
+            'ORD-FARM-000001',
+            45000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $this->createOrder(
+            $buyer,
+            $riceListing,
+            $farmer,
+            $rice,
+            'ORD-FARM-000002',
+            45000,
+            OrderStatus::New,
+            PaymentStatus::Pending
+        );
+
+        /*
+         * Must not appear for Ibrahim.
+         */
+        $this->createOrder(
+            $buyer,
+            $tomatoListing,
+            $otherFarmer,
+            $tomato,
+            'ORD-FARM-000003',
+            12000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?per_page=1'
+                .'&page=1'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'meta.current_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.per_page',
+                1
+            )
+            ->assertJsonPath(
+                'meta.last_page',
+                2
+            )
+            ->assertJsonPath(
+                'meta.total',
+                2
+            )
+            ->assertJsonStructure([
+                'data' => [
+                    [
+                        'id',
+                        'order_number',
+                        'status',
+                        'payment_status',
+                        'total',
+                        'items',
+                    ],
+                ],
+
+                'links' => [
+                    'first',
+                    'last',
+                    'prev',
+                    'next',
+                ],
+
+                'meta' => [
+                    'current_page',
+                    'from',
+                    'last_page',
+                    'links',
+                    'path',
+                    'per_page',
+                    'to',
+                    'total',
+                ],
+            ]);
+    }
+
+    public function test_multi_farmer_order_appears_once_in_farmer_history(): void
+    {
+        $token = $this->adminToken();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $farmerOne = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $farmerTwo = $this->createFarmer(
+            'Ada Okoro',
+            '08022222222'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $tomato = $this->createProduce(
+            'Tomato',
+            'Vegetables'
+        );
+
+        $riceListing = $this->createListing(
+            $farmerOne,
+            $rice,
+            45000
+        );
+
+        $maizeListing = $this->createListing(
+            $farmerOne,
+            $maize,
+            30000
+        );
+
+        $tomatoListing = $this->createListing(
+            $farmerTwo,
+            $tomato,
+            12000
+        );
+
+        $order = Order::create([
+            'user_id' =>
+                $buyer->id,
+
+            'listing_id' =>
+                $riceListing->id,
+
+            'quantity' =>
+                1,
+
+            'order_number' =>
+                'ORD-MULTI-000001',
+
+            'subtotal' =>
+                '87000.00',
+
+            'delivery_fee' =>
+                '0.00',
+
+            'total' =>
+                '87000.00',
+
+            'status' =>
+                OrderStatus::New,
+
+            'payment_status' =>
+                PaymentStatus::Pending,
+        ]);
+
+        $this->createOrderItem(
+            $order,
+            $riceListing,
+            $farmerOne,
+            $rice,
+            45000
+        );
+
+        /*
+         * Same farmer, second line item.
+         */
+        $this->createOrderItem(
+            $order,
+            $maizeListing,
+            $farmerOne,
+            $maize,
+            30000
+        );
+
+        /*
+         * Another farmer in the same parent order.
+         */
+        $this->createOrderItem(
+            $order,
+            $tomatoListing,
+            $farmerTwo,
+            $tomato,
+            12000
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmerOne->id}/orders"
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'meta.total',
+                1
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $order->id
+            );
+    }
+
+    public function test_admin_can_search_farmer_orders(): void
+    {
+        $token = $this->adminToken();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $maize = $this->createProduce(
+            'Maize',
+            'Grains'
+        );
+
+        $riceListing = $this->createListing(
+            $farmer,
+            $rice,
+            45000
+        );
+
+        $maizeListing = $this->createListing(
+            $farmer,
+            $maize,
+            30000
+        );
+
+        $riceOrder = $this->createOrder(
+            $buyer,
+            $riceListing,
+            $farmer,
+            $rice,
+            'ORD-RICE-000001',
+            45000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $this->createOrder(
+            $buyer,
+            $maizeListing,
+            $farmer,
+            $maize,
+            'ORD-MAIZE-000001',
+            30000,
+            OrderStatus::New,
+            PaymentStatus::Pending
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?search=ORD-RICE'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceOrder->id
+            );
+
+        /*
+         * Snapshot produce names are searchable.
+         */
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?search=Rice'
+            )
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $riceOrder->id
+            );
+    }
+
+    public function test_admin_can_filter_farmer_orders_by_status_and_payment_status(): void
+    {
+        $token = $this->adminToken();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $listing = $this->createListing(
+            $farmer,
+            $rice,
+            45000
+        );
+
+        $paidOrder = $this->createOrder(
+            $buyer,
+            $listing,
+            $farmer,
+            $rice,
+            'ORD-FILTER-000001',
+            45000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $this->createOrder(
+            $buyer,
+            $listing,
+            $farmer,
+            $rice,
+            'ORD-FILTER-000002',
+            45000,
+            OrderStatus::New,
+            PaymentStatus::Pending
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?status=delivered'
+                .'&payment_status=paid'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(
+                1,
+                'data'
+            )
+            ->assertJsonPath(
+                'data.0.id',
+                $paidOrder->id
+            )
+            ->assertJsonPath(
+                'data.0.status',
+                'delivered'
+            )
+            ->assertJsonPath(
+                'data.0.payment_status',
+                'paid'
+            );
+    }
+
+    public function test_admin_can_sort_farmer_orders_by_total(): void
+    {
+        $token = $this->adminToken();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $listing = $this->createListing(
+            $farmer,
+            $rice,
+            45000
+        );
+
+        $expensive = $this->createOrder(
+            $buyer,
+            $listing,
+            $farmer,
+            $rice,
+            'ORD-SORT-000001',
+            90000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $cheap = $this->createOrder(
+            $buyer,
+            $listing,
+            $farmer,
+            $rice,
+            'ORD-SORT-000002',
+            45000,
+            OrderStatus::New,
+            PaymentStatus::Pending
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?sort=total'
+                .'&order=asc'
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.0.id',
+                $cheap->id
+            )
+            ->assertJsonPath(
+                'data.1.id',
+                $expensive->id
+            );
+    }
+
+    public function test_farmer_order_pagination_preserves_filters(): void
+    {
+        $token = $this->adminToken();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $rice = $this->createProduce(
+            'Rice',
+            'Grains'
+        );
+
+        $listing = $this->createListing(
+            $farmer,
+            $rice,
+            45000
+        );
+
+        $this->createOrder(
+            $buyer,
+            $listing,
+            $farmer,
+            $rice,
+            'ORD-PAGE-000001',
+            45000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $this->createOrder(
+            $buyer,
+            $listing,
+            $farmer,
+            $rice,
+            'ORD-PAGE-000002',
+            90000,
+            OrderStatus::Delivered,
+            PaymentStatus::Paid
+        );
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?status=delivered'
+                .'&payment_status=paid'
+                .'&sort=total'
+                .'&order=asc'
+                .'&per_page=1'
+            );
+
+        $response->assertOk();
+
+        $next = $response->json(
+            'links.next'
+        );
+
+        $this->assertNotNull(
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'status=delivered',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'payment_status=paid',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'sort=total',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'order=asc',
+            $next
+        );
+
+        $this->assertStringContainsString(
+            'per_page=1',
+            $next
+        );
+    }
+
+    public function test_invalid_farmer_order_filters_are_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer(
+            'Ibrahim Musa',
+            '08011111111'
+        );
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}/orders"
+                .'?status=processing'
+                .'&payment_status=authorized'
+                .'&sort=unknown'
+                .'&per_page=101'
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'status',
+                'payment_status',
+                'sort',
+                'per_page',
+            ]);
+    }
+
+    private function createFarmer(
+        string $name,
+        string $phoneNumber
+    ): Farmer {
+        return Farmer::create([
+            'name' =>
+                $name,
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                $phoneNumber,
+        ]);
+    }
+
+    private function createProduce(
+        string $name,
+        string $categoryName
+    ): Produce {
+        $category = Category::firstOrCreate([
+            'name' =>
+                $categoryName,
+        ]);
+
+        return Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                $name,
+
+            'image' =>
+                base64_encode(
+                    strtolower($name)
+                ),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+    }
+
+    private function createListing(
+        Farmer $farmer,
+        Produce $produce,
+        int $price
+    ): Listing {
+        return Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                $price,
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                100,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+    }
+
+    private function createOrder(
+        User $buyer,
+        Listing $listing,
+        Farmer $farmer,
+        Produce $produce,
+        string $orderNumber,
+        int $total,
+        OrderStatus $status,
+        PaymentStatus $paymentStatus
+    ): Order {
+        $order = Order::create([
+            'user_id' =>
+                $buyer->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'quantity' =>
+                1,
+
+            'order_number' =>
+                $orderNumber,
+
+            'subtotal' =>
+                number_format(
+                    $total,
+                    2,
+                    '.',
+                    ''
+                ),
+
+            'delivery_fee' =>
+                '0.00',
+
+            'total' =>
+                number_format(
+                    $total,
+                    2,
+                    '.',
+                    ''
+                ),
+
+            'status' =>
+                $status,
+
+            'payment_status' =>
+                $paymentStatus,
+        ]);
+
+        $this->createOrderItem(
+            $order,
+            $listing,
+            $farmer,
+            $produce,
+            $total
+        );
+
+        return $order;
+    }
+
+    private function createOrderItem(
+        Order $order,
+        Listing $listing,
+        Farmer $farmer,
+        Produce $produce,
+        int $lineTotal
+    ): OrderItem {
+        return OrderItem::create([
+            'order_id' =>
+                $order->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'produce_name' =>
+                $produce->name,
+
+            'category_name' =>
+                $produce
+                    ->category
+                    ->name,
+
+            'unit' =>
+                $listing->unit,
+
+            'quantity' =>
+                1,
+
+            'unit_price' =>
+                number_format(
+                    $lineTotal,
+                    2,
+                    '.',
+                    ''
+                ),
+
+            'discount_amount' =>
+                '0.00',
+
+            'line_total' =>
+                number_format(
+                    $lineTotal,
+                    2,
+                    '.',
+                    ''
+                ),
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerProfileTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Enums\ListingStatus;
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Order;
+use App\Models\OrderItem;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerProfileTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' =>
+                UserRole::Admin,
+        ]);
+
+        return auth('api')->login(
+            $admin
+        );
+    }
+
+    public function test_admin_can_create_detailed_farmer_profile(): void
+    {
+        $token = $this->adminToken();
+
+        $response = $this
+            ->withToken($token)
+            ->postJson(
+                '/api/v1/admin/farmers',
+                [
+                    'name' =>
+                        'Ibrahim Musa',
+
+                    'email' =>
+                        'ibrahim@example.com',
+
+                    'phone_number' =>
+                        '08012345678',
+
+                    'state' =>
+                        'Niger',
+
+                    'lga' =>
+                        'Bida',
+
+                    'address' =>
+                        '12 Market Road, Bida',
+
+                    'gender' =>
+                        'Male',
+
+                    'date_of_birth' =>
+                        '1985-04-12',
+
+                    'farm_name' =>
+                        'Musa Farms',
+
+                    'farm_size_hectares' =>
+                        12.5,
+
+                    'farming_method' =>
+                        'Mixed farming',
+
+                    'years_experience' =>
+                        14,
+
+                    'farm_address' =>
+                        'Bida Agricultural Zone',
+
+                    'status' =>
+                        FarmerStatus::Active->value,
+                ]
+            );
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath(
+                'data.name',
+                'Ibrahim Musa'
+            )
+            ->assertJsonPath(
+                'data.email',
+                'ibrahim@example.com'
+            )
+            ->assertJsonPath(
+                'data.verification_status',
+                FarmerVerificationStatus::Pending
+                    ->value
+            )
+            ->assertJsonPath(
+                'data.farm.name',
+                'Musa Farms'
+            )
+            ->assertJsonPath(
+                'data.farm.size_hectares',
+                '12.50'
+            )
+            ->assertJsonPath(
+                'data.farm.farming_method',
+                'Mixed farming'
+            )
+            ->assertJsonPath(
+                'data.farm.years_experience',
+                14
+            );
+
+        $farmerCode =
+            $response->json(
+                'data.farmer_code'
+            );
+
+        $this->assertMatchesRegularExpression(
+            '/^FAR-\d{6}$/',
+            $farmerCode
+        );
+
+        $this->assertDatabaseHas(
+            'farmers',
+            [
+                'email' =>
+                    'ibrahim@example.com',
+
+                'farmer_code' =>
+                    $farmerCode,
+
+                'farm_name' =>
+                    'Musa Farms',
+
+                'verification_status' =>
+                    'pending',
+            ]
+        );
+    }
+
+    public function test_farmer_code_and_verification_cannot_be_supplied_by_client(): void
+    {
+        $token = $this->adminToken();
+
+        $this
+            ->withToken($token)
+            ->postJson(
+                '/api/v1/admin/farmers',
+                [
+                    'name' =>
+                        'Ibrahim Musa',
+
+                    'phone_number' =>
+                        '08012345678',
+
+                    'state' =>
+                        'Niger',
+
+                    'lga' =>
+                        'Bida',
+
+                    'status' =>
+                        FarmerStatus::Active->value,
+
+                    'farmer_code' =>
+                        'FAR-HACKED',
+
+                    'verification_status' =>
+                        'verified',
+                ]
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'farmer_code',
+                'verification_status',
+            ]);
+    }
+
+    public function test_admin_can_update_farmer_profile_without_changing_code(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $originalCode =
+            $farmer->farmer_code;
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}",
+                [
+                    'name' =>
+                        'Ibrahim Musa',
+
+                    'email' =>
+                        'ibrahim.musa@example.com',
+
+                    'phone_number' =>
+                        '08012345678',
+
+                    'state' =>
+                        'Kaduna',
+
+                    'lga' =>
+                        'Kagarko',
+
+                    'address' =>
+                        '10 Farm Road',
+
+                    'gender' =>
+                        'Male',
+
+                    'date_of_birth' =>
+                        '1985-04-12',
+
+                    'farm_name' =>
+                        'Musa Integrated Farms',
+
+                    'farm_size_hectares' =>
+                        20,
+
+                    'farming_method' =>
+                        'Irrigated farming',
+
+                    'years_experience' =>
+                        18,
+
+                    'farm_address' =>
+                        'Kagarko Farm Settlement',
+
+                    'status' =>
+                        FarmerStatus::Active->value,
+                ]
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.farmer_code',
+                $originalCode
+            )
+            ->assertJsonPath(
+                'data.state',
+                'Kaduna'
+            )
+            ->assertJsonPath(
+                'data.farm.name',
+                'Musa Integrated Farms'
+            )
+            ->assertJsonPath(
+                'data.farm.size_hectares',
+                '20.00'
+            );
+
+        $farmer->refresh();
+
+        $this->assertSame(
+            $originalCode,
+            $farmer->farmer_code
+        );
+
+        $this->assertSame(
+            'Musa Integrated Farms',
+            $farmer->farm_name
+        );
+    }
+
+    public function test_farmer_overview_uses_only_paid_item_earnings(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $category = Category::create([
+            'name' =>
+                'Grains',
+        ]);
+
+        $produce = Produce::create([
+            'category_id' =>
+                $category->id,
+
+            'name' =>
+                'Rice',
+
+            'image' =>
+                base64_encode('rice'),
+
+            'image_mime' =>
+                'image/jpeg',
+        ]);
+
+        $listing = Listing::create([
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'price' =>
+                '5000.00',
+
+            'unit' =>
+                'bag',
+
+            'stock' =>
+                100,
+
+            'status' =>
+                ListingStatus::Active,
+        ]);
+
+        $paidOrder = Order::create([
+            'user_id' =>
+                $buyer->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'quantity' =>
+                2,
+
+            'order_number' =>
+                'ORD-FARM-000001',
+
+            'subtotal' =>
+                '10000.00',
+
+            'delivery_fee' =>
+                '0.00',
+
+            'total' =>
+                '10000.00',
+
+            'status' =>
+                OrderStatus::Delivered,
+
+            'payment_status' =>
+                PaymentStatus::Paid,
+        ]);
+
+        OrderItem::create([
+            'order_id' =>
+                $paidOrder->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'produce_name' =>
+                'Rice',
+
+            'category_name' =>
+                'Grains',
+
+            'unit' =>
+                'bag',
+
+            'quantity' =>
+                2,
+
+            'unit_price' =>
+                '5000.00',
+
+            'discount_amount' =>
+                '0.00',
+
+            'line_total' =>
+                '10000.00',
+        ]);
+
+        $pendingOrder = Order::create([
+            'user_id' =>
+                $buyer->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'quantity' =>
+                1,
+
+            'order_number' =>
+                'ORD-FARM-000002',
+
+            'subtotal' =>
+                '5000.00',
+
+            'delivery_fee' =>
+                '0.00',
+
+            'total' =>
+                '5000.00',
+
+            'status' =>
+                OrderStatus::Delivered,
+
+            'payment_status' =>
+                PaymentStatus::Pending,
+        ]);
+
+        OrderItem::create([
+            'order_id' =>
+                $pendingOrder->id,
+
+            'listing_id' =>
+                $listing->id,
+
+            'farmer_id' =>
+                $farmer->id,
+
+            'produce_id' =>
+                $produce->id,
+
+            'produce_name' =>
+                'Rice',
+
+            'category_name' =>
+                'Grains',
+
+            'unit' =>
+                'bag',
+
+            'quantity' =>
+                1,
+
+            'unit_price' =>
+                '5000.00',
+
+            'discount_amount' =>
+                '0.00',
+
+            'line_total' =>
+                '5000.00',
+        ]);
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}"
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.orders_count',
+                2
+            )
+            ->assertJsonPath(
+                'data.completed_orders_count',
+                2
+            )
+            ->assertJsonPath(
+                'data.total_earned',
+                '10000.00'
+            );
+    }
+
+    private function createFarmer(): Farmer
+    {
+        return Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerShowTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Order;
+use App\Models\OrderItem;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerShowTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_admin_can_view_farmer_with_listings_and_orders(): void
+    {
+        $admin = User::factory()->create([
+            'role' => UserRole::Admin,
+        ]);
+
+        $buyer = User::factory()->create([
+            'role' => UserRole::User,
+        ]);
+
+        $token = auth('api')->login($admin);
+
+        $farmer = Farmer::create([
+            'name' => 'Ibrahim Musa',
+            'state' => 'Niger',
+            'lga' => 'Bida',
+            'status' => FarmerStatus::Active,
+            'phone_number' => '08012345678',
+        ]);
+
+        $category = Category::create([
+            'name' => 'Grains',
+        ]);
+
+        $produce = Produce::create([
+            'category_id' => $category->id,
+            'name' => 'Rice',
+            'image' => base64_encode('rice'),
+            'image_mime' => 'image/jpeg',
+        ]);
+
+        $listing = Listing::create([
+            'farmer_id' => $farmer->id,
+            'produce_id' => $produce->id,
+            'price' => 45000,
+            'unit' => 'bag',
+            'stock' => 50,
+            'status' => ListingStatus::Active,
+        ]);
+
+        /*
+         * Delivered and paid order.
+         *
+         * This order contributes to the farmer's earnings.
+         */
+        $paidOrder = Order::create([
+            'user_id' => $buyer->id,
+            'listing_id' => $listing->id,
+            'quantity' => 2,
+            'order_number' => 'ORD-FARM-000001',
+            'subtotal' => '90000.00',
+            'delivery_fee' => '0.00',
+            'total' => '90000.00',
+            'status' => OrderStatus::Delivered,
+            'payment_status' => PaymentStatus::Paid,
+        ]);
+
+        OrderItem::create([
+            'order_id' => $paidOrder->id,
+            'listing_id' => $listing->id,
+            'farmer_id' => $farmer->id,
+            'produce_id' => $produce->id,
+            'produce_name' => 'Rice',
+            'category_name' => 'Grains',
+            'unit' => 'bag',
+            'quantity' => 2,
+            'unit_price' => '45000.00',
+            'discount_amount' => '0.00',
+            'line_total' => '90000.00',
+        ]);
+
+        /*
+         * Cancelled and unpaid order.
+         *
+         * It belongs to this farmer's order history,
+         * but must not contribute to earnings.
+         */
+        $cancelledOrder = Order::create([
+            'user_id' => $buyer->id,
+            'listing_id' => $listing->id,
+            'quantity' => 1,
+            'order_number' => 'ORD-FARM-000002',
+            'subtotal' => '45000.00',
+            'delivery_fee' => '0.00',
+            'total' => '45000.00',
+            'status' => OrderStatus::Cancelled,
+            'payment_status' => PaymentStatus::Pending,
+        ]);
+
+        OrderItem::create([
+            'order_id' => $cancelledOrder->id,
+            'listing_id' => $listing->id,
+            'farmer_id' => $farmer->id,
+            'produce_id' => $produce->id,
+            'produce_name' => 'Rice',
+            'category_name' => 'Grains',
+            'unit' => 'bag',
+            'quantity' => 1,
+            'unit_price' => '45000.00',
+            'discount_amount' => '0.00',
+            'line_total' => '45000.00',
+        ]);
+
+        $response = $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/admin/farmers/{$farmer->id}"
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.listings_count',
+                1
+            )
+            ->assertJsonPath(
+                'data.orders_count',
+                2
+            )
+            ->assertJsonPath(
+                'data.completed_orders_count',
+                1
+            )
+            ->assertJsonPath(
+                'data.total_earned',
+                '90000.00'
+            )
+            ->assertJsonCount(
+                1,
+                'data.listings'
+            )
+            ->assertJsonCount(
+                2,
+                'data.orders'
+            )
+            ->assertJsonPath(
+                'data.listings.0.produce.name',
+                'Rice'
+            )
+            ->assertJsonPath(
+                'data.listings.0.unit',
+                'bag'
+            );
+    }
+}
+
+--- C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\FarmerStateTest.php ---
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use App\Enums\UserRole;
+use App\Models\Farmer;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class FarmerStateTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function adminToken(): string
+    {
+        $admin = User::factory()->create([
+            'role' =>
+                UserRole::Admin,
+        ]);
+
+        return auth('api')->login(
+            $admin
+        );
+    }
+
+    public function test_admin_can_suspend_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $response = $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/status",
+                [
+                    'status' =>
+                        FarmerStatus::Inactive->value,
+                ]
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.status',
+                'inactive'
+            );
+
+        $this->assertNotNull(
+            $response->json(
+                'data.suspended_at'
+            )
+        );
+
+        $farmer->refresh();
+
+        $this->assertSame(
+            FarmerStatus::Inactive,
+            $farmer->status
+        );
+
+        $this->assertNotNull(
+            $farmer->suspended_at
+        );
+    }
+
+    public function test_admin_can_reactivate_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $farmer->forceFill([
+            'status' =>
+                FarmerStatus::Inactive,
+
+            'suspended_at' =>
+                now(),
+        ])->save();
+
+        $response = $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/status",
+                [
+                    'status' =>
+                        FarmerStatus::Active->value,
+                ]
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.status',
+                'active'
+            )
+            ->assertJsonPath(
+                'data.suspended_at',
+                null
+            );
+
+        $farmer->refresh();
+
+        $this->assertSame(
+            FarmerStatus::Active,
+            $farmer->status
+        );
+
+        $this->assertNull(
+            $farmer->suspended_at
+        );
+    }
+
+    public function test_admin_can_verify_farmer(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $response = $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/verification",
+                [
+                    'verification_status' =>
+                        FarmerVerificationStatus::Verified
+                            ->value,
+                ]
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.verification_status',
+                'verified'
+            );
+
+        $this->assertNotNull(
+            $response->json(
+                'data.verified_at'
+            )
+        );
+
+        $farmer->refresh();
+
+        $this->assertSame(
+            FarmerVerificationStatus::Verified,
+            $farmer->verification_status
+        );
+
+        $this->assertNotNull(
+            $farmer->verified_at
+        );
+    }
+
+    public function test_admin_can_reject_farmer_verification(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $farmer->forceFill([
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'verified_at' =>
+                now(),
+        ])->save();
+
+        $response = $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/verification",
+                [
+                    'verification_status' =>
+                        FarmerVerificationStatus::Rejected
+                            ->value,
+                ]
+            );
+
+        $response
+            ->assertOk()
+            ->assertJsonPath(
+                'data.verification_status',
+                'rejected'
+            )
+            ->assertJsonPath(
+                'data.verified_at',
+                null
+            );
+
+        $farmer->refresh();
+
+        $this->assertSame(
+            FarmerVerificationStatus::Rejected,
+            $farmer->verification_status
+        );
+
+        $this->assertNull(
+            $farmer->verified_at
+        );
+    }
+
+    public function test_admin_can_return_farmer_verification_to_pending(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $farmer->forceFill([
+            'verification_status' =>
+                FarmerVerificationStatus::Verified,
+
+            'verified_at' =>
+                now(),
+        ])->save();
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/verification",
+                [
+                    'verification_status' =>
+                        FarmerVerificationStatus::Pending
+                            ->value,
+                ]
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.verification_status',
+                'pending'
+            )
+            ->assertJsonPath(
+                'data.verified_at',
+                null
+            );
+    }
+
+    public function test_invalid_farmer_status_is_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/status",
+                [
+                    'status' =>
+                        'suspended',
+                ]
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'status',
+            ]);
+    }
+
+    public function test_invalid_farmer_verification_status_is_rejected(): void
+    {
+        $token = $this->adminToken();
+
+        $farmer = $this->createFarmer();
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/verification",
+                [
+                    'verification_status' =>
+                        'approved',
+                ]
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'verification_status',
+            ]);
+    }
+
+    public function test_buyer_cannot_change_farmer_state(): void
+    {
+        $buyer = User::factory()->create([
+            'role' =>
+                UserRole::User,
+        ]);
+
+        $token = auth('api')->login(
+            $buyer
+        );
+
+        $farmer = $this->createFarmer();
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/status",
+                [
+                    'status' =>
+                        FarmerStatus::Inactive->value,
+                ]
+            )
+            ->assertForbidden();
+
+        $this
+            ->withToken($token)
+            ->patchJson(
+                "/api/v1/admin/farmers/{$farmer->id}/verification",
+                [
+                    'verification_status' =>
+                        FarmerVerificationStatus::Verified
+                            ->value,
+                ]
+            )
+            ->assertForbidden();
+    }
+
+    private function createFarmer(): Farmer
+    {
+        return Farmer::create([
+            'name' =>
+                'Ibrahim Musa',
+
+            'state' =>
+                'Niger',
+
+            'lga' =>
+                'Bida',
+
+            'status' =>
+                FarmerStatus::Active,
+
+            'verification_status' =>
+                FarmerVerificationStatus::Pending,
+
+            'phone_number' =>
+                '08012345678',
+        ]);
+    }
+}
+
+=== Farmer routes ===
+
+  use App\Http\Controllers\Api\V1\Admin\CategoryController;
+  use App\Http\Controllers\Api\V1\Admin\DashboardController;
+  use App\Http\Controllers\Api\V1\Admin\DisputeController as AdminDisputeController;
+> use App\Http\Controllers\Api\V1\Admin\FarmerController;
+  use App\Http\Controllers\Api\V1\Admin\ListingController as AdminListingController;
+  use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
+  use App\Http\Controllers\Api\V1\Admin\ProduceController;
+  use App\Http\Controllers\Api\V1\Admin\UserController;
+  use App\Http\Controllers\Api\V1\AuthController;
+  use App\Http\Controllers\Api\V1\DisputeController;
+  use App\Http\Controllers\Api\V1\ListingController;
+  use App\Http\Controllers\Api\V1\OrderController;
+              );
+  
+              Route::patch(
+>                 'farmers/{farmer}/status',
+                  [
+>                     FarmerController::class,
+                      'updateStatus',
+                  ]
+              );
+  
+              Route::patch(
+>                 'farmers/{farmer}/verification',
+                  [
+>                     FarmerController::class,
+                      'updateVerification',
+                  ]
+              );
+  
+              Route::apiResource(
+>                 'farmers',
+>                 FarmerController::class
+              );
+  
+              Route::get(
+                  'listings',
+                  [
+                      AdminListingController::class,
+                      'all',
+                  ]
+              );
+  
+              Route::get(
+>                 'farmers/{farmer}/listings',
+                  [
+                      AdminListingController::class,
+                      'index',
+                  ]
+              );
+  
+              Route::post(
+>                 'farmers/{farmer}/listings',
+                  [
+                      AdminListingController::class,
+                      'store',
+                  ]
+              );
+  
+              Route::get(
+>                 'farmers/{farmer}/orders',
+                  [
+                      AdminOrderController::class,
+>                     'farmerIndex',
+                  ]
+              );
+  
+              Route::get(
+                  'orders',
+                  [
+                      AdminOrderController::class,
+                      'index',
+
+
+
+
+=== Farmer migrations ===
+
+--- database/migrations/2026_06_10_100002_create_farmers_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('farmers', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('lga');
+            $table->string('status')->default('active');
+            $table->string('phone_number');
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('farmers');
+    }
+};
+
+--- database/migrations/2026_06_10_110000_add_state_to_farmers_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->string('state')->after('name');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->dropColumn('state');
+        });
+    }
+};
+
+--- database/migrations/2026_08_13_092212_add_profile_fields_to_farmers_table.php ---
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->string('farmer_code')
+                ->nullable()
+                ->unique()
+                ->after('id');
+
+            $table->string('email')
+                ->nullable()
+                ->unique()
+                ->after('name');
+
+            $table->text('address')
+                ->nullable()
+                ->after('phone_number');
+
+            $table->string('gender', 30)
+                ->nullable()
+                ->after('address');
+
+            $table->date('date_of_birth')
+                ->nullable()
+                ->after('gender');
+
+            $table->string('farm_name')
+                ->nullable()
+                ->after('date_of_birth');
+
+            $table->decimal(
+                'farm_size_hectares',
+                10,
+                2
+            )
+                ->nullable()
+                ->after('farm_name');
+
+            $table->string('farming_method')
+                ->nullable()
+                ->after('farm_size_hectares');
+
+            $table->unsignedSmallInteger(
+                'years_experience'
+            )
+                ->nullable()
+                ->after('farming_method');
+
+            $table->text('farm_address')
+                ->nullable()
+                ->after('years_experience');
+
+            $table->string(
+                'verification_status'
+            )
+                ->default('pending')
+                ->after('status');
+
+            $table->timestamp('verified_at')
+                ->nullable()
+                ->after('verification_status');
+
+            $table->timestamp('suspended_at')
+                ->nullable()
+                ->after('verified_at');
+        });
+
+        /*
+         * Existing farmers already have active marketplace
+         * data, so treat them as verified during the backfill.
+         *
+         * We do not invent a verified_at timestamp because
+         * the historical verification date is unknown.
+         */
+        DB::table('farmers')
+            ->select('id')
+            ->orderBy('id')
+            ->chunkById(
+                500,
+                function ($farmers): void {
+                    foreach ($farmers as $farmer) {
+                        DB::table('farmers')
+                            ->where(
+                                'id',
+                                $farmer->id
+                            )
+                            ->update([
+                                'farmer_code' =>
+                                    'FAR-'
+                                    .str_pad(
+                                        (string) $farmer->id,
+                                        6,
+                                        '0',
+                                        STR_PAD_LEFT
+                                    ),
+
+                                'verification_status' =>
+                                    'verified',
+                            ]);
+                    }
+                }
+            );
+    }
+
+    public function down(): void
+    {
+        Schema::table('farmers', function (Blueprint $table) {
+            $table->dropUnique([
+                'farmer_code',
+            ]);
+
+            $table->dropUnique([
+                'email',
+            ]);
+
+            $table->dropColumn([
+                'farmer_code',
+                'email',
+                'address',
+                'gender',
+                'date_of_birth',
+                'farm_name',
+                'farm_size_hectares',
+                'farming_method',
+                'years_experience',
+                'farm_address',
+                'verification_status',
+                'verified_at',
+                'suspended_at',
+            ]);
+        });
+    }
+};
+
+=== Dispute model/resource if present ===
+<?php
+
+namespace App\Models;
+
+use App\Enums\DisputeStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+#[Fillable(['order_id', 'user_id', 'subject', 'status'])]
+class Dispute extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'status' => DisputeStatus::class,
+        ];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function messages(): HasMany
+    {
+        return $this->hasMany(DisputeMessage::class);
+    }
+
+    public function isOpen(): bool
+    {
+        return $this->status === DisputeStatus::Open;
+    }
+}
+
+--- DisputeResource ---
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+class DisputeResource extends JsonResource
+{
+    public function toArray(Request $request): array
+    {
+        return [
+            'id' => $this->id,
+            'order_id' => $this->order_id,
+            'user_id' => $this->user_id,
+            'subject' => $this->subject,
+            'status' => $this->status->value,
+            'buyer' => $this->when(
+                $this->relationLoaded('user') && $this->user,
+                fn () => [
+                    'id' => $this->user->id,
+                    'name' => $this->user->name,
+                    'email' => $this->user->email,
+                ],
+            ),
+            'order' => $this->when(
+                $this->relationLoaded('order') && $this->order,
+                fn () => [
+                    'id' => $this->order->id,
+                    'quantity' => $this->order->quantity,
+                    'total' => $this->order->total,
+                    'status' => $this->order->status->value,
+                    'produce' => $this->when(
+                        $this->order->relationLoaded('listing')
+                            && $this->order->listing
+                            && $this->order->listing->relationLoaded('produce')
+                            && $this->order->listing->produce,
+                        fn () => [
+                            'id' => $this->order->listing->produce->id,
+                            'name' => $this->order->listing->produce->name,
+                            'image_url' => $this->order->listing->produce->image_url,
+                        ],
+                    ),
+                ],
+            ),
+            'messages' => DisputeMessageResource::collection($this->whenLoaded('messages')),
+            'messages_count' => $this->whenCounted('messages'),
+            'created_at' => $this->created_at,
+            'updated_at' => $this->updated_at,
+        ];
+    }
+}

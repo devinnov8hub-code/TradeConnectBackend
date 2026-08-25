@@ -1,0 +1,1539 @@
+
+===== app/Enums/FarmerStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum FarmerStatus: string
+{
+    case Active = 'active';
+    case Inactive = 'inactive';
+}
+
+===== app/Enums/FarmerVerificationStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum FarmerVerificationStatus: string
+{
+    case Pending = 'pending';
+    case Verified = 'verified';
+    case Rejected = 'rejected';
+}
+
+===== app/Enums/ListingPublicationStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum ListingPublicationStatus: string
+{
+    case Pending = 'pending';
+    case Live = 'live';
+    case Inactive = 'inactive';
+}
+
+===== app/Enums/ListingStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum ListingStatus: string
+{
+    case Active = 'active';
+    case Inactive = 'inactive';
+}
+
+===== app/Enums/OrderStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum OrderStatus: string
+{
+    case New = 'new';
+    case InTransit = 'in_transit';
+    case Cancelled = 'cancelled';
+    case Delivered = 'delivered';
+}
+
+===== app/Enums/PaymentStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum PaymentStatus: string
+{
+    case Pending = 'pending';
+    case Paid = 'paid';
+    case Failed = 'failed';
+    case Refunded = 'refunded';
+}
+
+===== app/Enums/UserRole.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum UserRole: string
+{
+    case Admin = 'admin';
+    case User = 'user';
+}
+
+===== app/Enums/UserStatus.php =====
+
+<?php
+
+namespace App\Enums;
+
+enum UserStatus: string
+{
+    case Active = 'active';
+    case Inactive = 'inactive';
+}
+
+===== app/Http/Controllers/Api/V1/Admin/DashboardController.php =====
+
+<?php
+
+namespace App\Http\Controllers\Api\V1\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\UserRole;
+use App\Http\Controllers\Controller;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Order;
+use App\Models\User;
+use Illuminate\Http\JsonResponse;
+
+class DashboardController extends Controller
+{
+    public function __invoke(): JsonResponse
+    {
+        return response()->json([
+            'data' => [
+                'total_orders' => Order::query()->count(),
+                'total_listings' => Listing::query()->count(),
+                'active_farmers' => Farmer::query()
+                    ->where('status', FarmerStatus::Active)
+                    ->count(),
+                'active_users' => User::query()
+                    ->where('role', UserRole::User)
+                    ->count(),
+            ],
+        ]);
+    }
+}
+
+===== app/Models/Farmer.php =====
+
+<?php
+
+namespace App\Models;
+
+use App\Enums\FarmerStatus;
+use App\Enums\FarmerVerificationStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+
+#[Fillable([
+    'name',
+    'email',
+    'state',
+    'lga',
+    'phone_number',
+    'address',
+    'gender',
+    'date_of_birth',
+    'farm_name',
+    'farm_size_hectares',
+    'farming_method',
+    'years_experience',
+    'farm_address',
+    'status',
+    'verification_status',
+    'verified_at',
+    'suspended_at',
+])]
+class Farmer extends Model
+{
+    protected $attributes = [
+        'verification_status' =>
+            'pending',
+    ];
+
+    protected static function booted(): void
+    {
+        static::created(
+            function (
+                Farmer $farmer
+            ): void {
+                /*
+                 * Generate the public farmer code from the
+                 * database ID so concurrent farmer creation
+                 * cannot generate the same code.
+                 */
+                if (! $farmer->farmer_code) {
+                    $farmer->forceFill([
+                        'farmer_code' =>
+                            'FAR-'
+                            .str_pad(
+                                (string) $farmer->id,
+                                6,
+                                '0',
+                                STR_PAD_LEFT
+                            ),
+                    ])->saveQuietly();
+                }
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'status' =>
+                FarmerStatus::class,
+
+            'verification_status' =>
+                FarmerVerificationStatus::class,
+
+            'date_of_birth' =>
+                'date',
+
+            'farm_size_hectares' =>
+                'decimal:2',
+
+            'years_experience' =>
+                'integer',
+
+            'verified_at' =>
+                'datetime',
+
+            'suspended_at' =>
+                'datetime',
+        ];
+    }
+
+    public function listings(): HasMany
+    {
+        return $this->hasMany(
+            Listing::class
+        );
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    /*
+     * Legacy relationship.
+     *
+     * New multi-item order reporting should use
+     * orderItems rather than relying on orders.listing_id.
+     */
+    public function orders(): HasManyThrough
+    {
+        return $this->hasManyThrough(
+            Order::class,
+            Listing::class
+        );
+    }
+
+    /*
+     * A farmer must satisfy both operational state and
+     * identity verification before a marketplace listing
+     * can become live.
+     */
+    public function canPublishListings(): bool
+    {
+        return $this->status
+                === FarmerStatus::Active
+            && $this->verification_status
+                === FarmerVerificationStatus::Verified;
+    }
+}
+
+===== app/Models/Listing.php =====
+
+<?php
+
+namespace App\Models;
+
+use App\Enums\ListingPublicationStatus;
+use App\Enums\ListingStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+#[Fillable([
+    'farmer_id',
+    'produce_id',
+
+    'price',
+    'original_price',
+    'discount_percent',
+
+    'unit',
+    'stock',
+    'minimum_order_quantity',
+
+    'description',
+    'label',
+    'grade',
+    'available_from',
+
+    /*
+     * status remains temporarily for legacy
+     * active/inactive compatibility.
+     */
+    'status',
+
+    'publication_status',
+])]
+class Listing extends Model
+{
+    /*
+     * Listing images are part of the standard listing
+     * representation. Eager loading here prevents an
+     * N+1 problem across marketplace/admin pages.
+     */
+    protected $with = [
+        'images',
+    ];
+
+    protected static function booted(): void
+    {
+        static::saving(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->synchronisePublicationState();
+
+                $listing
+                    ->synchroniseDiscount();
+            }
+        );
+
+        /*
+         * Database cascading removes image rows, but
+         * the actual files live outside the database.
+         *
+         * Delete child models explicitly so their
+         * filesystem cleanup event runs.
+         */
+        static::deleting(
+            function (
+                Listing $listing
+            ): void {
+                $listing
+                    ->images()
+                    ->get()
+                    ->each(
+                        fn (
+                            ListingImage $image
+                        ) =>
+                            $image->delete()
+                    );
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'price' =>
+                'decimal:2',
+
+            'original_price' =>
+                'decimal:2',
+
+            'discount_percent' =>
+                'decimal:2',
+
+            'minimum_order_quantity' =>
+                'decimal:2',
+
+            'available_from' =>
+                'date',
+
+            'status' =>
+                ListingStatus::class,
+
+            'publication_status' =>
+                ListingPublicationStatus::class,
+
+            'published_at' =>
+                'datetime',
+        ];
+    }
+
+    /*
+     * Legacy single-listing order relationship.
+     */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(
+            Order::class
+        );
+    }
+
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    public function images(): HasMany
+    {
+        return $this
+            ->hasMany(
+                ListingImage::class
+            )
+            ->orderBy(
+                'position'
+            )
+            ->orderBy('id');
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(
+            Farmer::class
+        );
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(
+            Produce::class
+        );
+    }
+
+    public function isAvailable(): bool
+    {
+        if (
+            $this->publication_status
+            !== ListingPublicationStatus::Live
+        ) {
+            return false;
+        }
+
+        if (
+            $this->status
+            !== ListingStatus::Active
+        ) {
+            return false;
+        }
+
+        if (
+            $this->available_from !== null
+            && $this
+                ->available_from
+                ->gt(
+                    now()
+                        ->startOfDay()
+                )
+        ) {
+            return false;
+        }
+
+        return (float) $this->stock
+            >= (float) $this
+                ->minimum_order_quantity;
+    }
+
+    private function synchronisePublicationState(): void
+    {
+        if (! $this->exists) {
+            $attributes =
+                $this->getAttributes();
+
+            $publicationProvided =
+                array_key_exists(
+                    'publication_status',
+                    $attributes
+                )
+                && $attributes[
+                    'publication_status'
+                ] !== null;
+
+            if ($publicationProvided) {
+                $this
+                    ->synchroniseLegacyStatusFromPublication();
+            } elseif (
+                array_key_exists(
+                    'status',
+                    $attributes
+                )
+                && $attributes[
+                    'status'
+                ] !== null
+            ) {
+                $this
+                    ->synchronisePublicationFromLegacyStatus();
+            } else {
+                $this->publication_status =
+                    ListingPublicationStatus::Pending;
+
+                $this->status =
+                    ListingStatus::Inactive;
+            }
+        } elseif (
+            $this->isDirty(
+                'publication_status'
+            )
+        ) {
+            $this
+                ->synchroniseLegacyStatusFromPublication();
+        } elseif (
+            $this->isDirty(
+                'status'
+            )
+        ) {
+            $this
+                ->synchronisePublicationFromLegacyStatus();
+        }
+
+        if (
+            $this->publication_status
+                === ListingPublicationStatus::Live
+            && $this->published_at
+                === null
+        ) {
+            $this->published_at =
+                now();
+        }
+    }
+
+    private function synchroniseLegacyStatusFromPublication(): void
+    {
+        $this->status =
+            $this->publication_status
+                === ListingPublicationStatus::Live
+                    ? ListingStatus::Active
+                    : ListingStatus::Inactive;
+    }
+
+    private function synchronisePublicationFromLegacyStatus(): void
+    {
+        $this->publication_status =
+            $this->status
+                === ListingStatus::Active
+                    ? ListingPublicationStatus::Live
+                    : ListingPublicationStatus::Inactive;
+    }
+
+    private function synchroniseDiscount(): void
+    {
+        if (
+            $this->original_price === null
+        ) {
+            $this->discount_percent =
+                null;
+
+            return;
+        }
+
+        $originalPrice =
+            (float) $this
+                ->original_price;
+
+        $currentPrice =
+            (float) $this->price;
+
+        if (
+            $originalPrice <= 0
+        ) {
+            $this->discount_percent =
+                '0.00';
+
+            return;
+        }
+
+        $discount =
+            (
+                (
+                    $originalPrice
+                    - $currentPrice
+                )
+                / $originalPrice
+            )
+            * 100;
+
+        $this->discount_percent =
+            number_format(
+                max(
+                    0,
+                    round(
+                        $discount,
+                        2
+                    )
+                ),
+                2,
+                '.',
+                ''
+            );
+    }
+}
+
+===== app/Models/Order.php =====
+
+<?php
+
+namespace App\Models;
+
+use App\Enums\OrderStatus;
+use App\Enums\PaymentStatus;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+#[Fillable([
+    'user_id',
+
+    // Legacy single-item fields.
+    'listing_id',
+    'quantity',
+
+    'order_number',
+    'subtotal',
+    'delivery_fee',
+    'total',
+
+    'status',
+
+    'payment_status',
+    'payment_provider',
+    'payment_reference',
+    'payment_access_code',
+    'payment_authorization_url',
+
+    'delivery_method',
+    'delivery_name',
+    'delivery_phone',
+    'delivery_state',
+    'delivery_lga',
+    'delivery_address',
+    'delivery_notes',
+
+    'placed_at',
+    'confirmed_at',
+    'processing_at',
+    'out_for_delivery_at',
+    'deliver_by',
+    'delivered_at',
+    'cancelled_at',
+
+    'paid_at',
+    'payment_failed_at',
+    'refunded_at',
+])]
+class Order extends Model
+{
+    protected static function booted(): void
+    {
+        /*
+         * Every newly-created order begins its
+         * append-only status timeline here.
+         */
+        static::created(
+            function (Order $order): void {
+                $order->recordStatusEvent(
+                    null,
+                    $order->status
+                );
+            }
+        );
+
+        /*
+         * Capture status transitions regardless of
+         * whether they originate from the admin
+         * workflow or buyer cancellation workflow.
+         */
+        static::updated(
+            function (Order $order): void {
+                if (
+                    ! $order->wasChanged(
+                        'status'
+                    )
+                ) {
+                    return;
+                }
+
+                $previous =
+                    $order->getPrevious();
+
+                $previousStatus =
+                    $previous['status']
+                    ?? null;
+
+                if (
+                    $previousStatus
+                    instanceof OrderStatus
+                ) {
+                    $fromStatus =
+                        $previousStatus;
+                } elseif (
+                    $previousStatus !== null
+                ) {
+                    $fromStatus =
+                        OrderStatus::tryFrom(
+                            (string)
+                                $previousStatus
+                        );
+                } else {
+                    $fromStatus = null;
+                }
+
+                $order->recordStatusEvent(
+                    $fromStatus,
+                    $order->status
+                );
+            }
+        );
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'subtotal' =>
+                'decimal:2',
+
+            'delivery_fee' =>
+                'decimal:2',
+
+            'total' =>
+                'decimal:2',
+
+            'status' =>
+                OrderStatus::class,
+
+            'payment_status' =>
+                PaymentStatus::class,
+
+            'placed_at' =>
+                'datetime',
+
+            'confirmed_at' =>
+                'datetime',
+
+            'processing_at' =>
+                'datetime',
+
+            'out_for_delivery_at' =>
+                'datetime',
+
+            'deliver_by' =>
+                'datetime',
+
+            'delivered_at' =>
+                'datetime',
+
+            'cancelled_at' =>
+                'datetime',
+
+            'paid_at' =>
+                'datetime',
+
+            'payment_failed_at' =>
+                'datetime',
+
+            'refunded_at' =>
+                'datetime',
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(
+            User::class
+        );
+    }
+
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(
+            Listing::class
+        );
+    }
+
+    public function items(): HasMany
+    {
+        return $this->hasMany(
+            OrderItem::class
+        );
+    }
+
+    public function statusEvents(): HasMany
+    {
+        return $this
+            ->hasMany(
+                OrderStatusEvent::class
+            )
+            ->orderBy(
+                'occurred_at'
+            )
+            ->orderBy('id');
+    }
+
+    public function dispute(): HasOne
+    {
+        return $this->hasOne(
+            Dispute::class
+        );
+    }
+
+    public function isCancellable(): bool
+    {
+        /*
+         * Until refund support exists, a paid
+         * order must not be cancelled directly.
+         */
+        return $this->status
+                === OrderStatus::New
+            && $this->payment_status
+                !== PaymentStatus::Paid;
+    }
+
+    private function recordStatusEvent(
+        ?OrderStatus $fromStatus,
+        OrderStatus $toStatus
+    ): void {
+        $occurredAt = match (
+            $toStatus
+        ) {
+            OrderStatus::New =>
+                $this->placed_at
+                ?? $this->created_at
+                ?? now(),
+
+            OrderStatus::InTransit =>
+                $this->out_for_delivery_at
+                ?? now(),
+
+            OrderStatus::Delivered =>
+                $this->delivered_at
+                ?? now(),
+
+            OrderStatus::Cancelled =>
+                $this->cancelled_at
+                ?? now(),
+        };
+
+        /*
+         * The currently-authenticated API user is
+         * the actor for HTTP-driven changes.
+         *
+         * Console jobs or other system processes
+         * naturally produce a null actor.
+         */
+        $actorId = auth('api')->id();
+
+        $this
+            ->statusEvents()
+            ->create([
+                'from_status' =>
+                    $fromStatus,
+
+                'to_status' =>
+                    $toStatus,
+
+                'changed_by_user_id' =>
+                    $actorId,
+
+                'note' =>
+                    null,
+
+                'occurred_at' =>
+                    $occurredAt,
+            ]);
+    }
+}
+
+===== app/Models/OrderItem.php =====
+
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+#[Fillable([
+    'order_id',
+    'listing_id',
+    'farmer_id',
+    'produce_id',
+    'produce_name',
+    'category_name',
+    'unit',
+    'quantity',
+    'unit_price',
+    'discount_amount',
+    'line_total',
+])]
+class OrderItem extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'unit_price' => 'decimal:2',
+            'discount_amount' => 'decimal:2',
+            'line_total' => 'decimal:2',
+        ];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
+    }
+
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(Listing::class);
+    }
+
+    public function farmer(): BelongsTo
+    {
+        return $this->belongsTo(Farmer::class);
+    }
+
+    public function produce(): BelongsTo
+    {
+        return $this->belongsTo(Produce::class);
+    }
+}
+
+===== app/Models/User.php =====
+
+<?php
+
+namespace App\Models;
+
+// use Illuminate\Contracts\Auth\MustVerifyEmail;
+
+use App\Enums\UserRole;
+use App\Enums\UserStatus;
+use Database\Factories\UserFactory;
+use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Attributes\Hidden;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use PHPOpenSourceSaver\JWTAuth\Contracts\JWTSubject;
+
+#[Fillable([
+    'name',
+    'email',
+    'password',
+    'role',
+    'phone_number',
+    'state',
+    'lga',
+    'address',
+    'avatar_path',
+])]
+#[Hidden([
+    'password',
+    'remember_token',
+])]
+class User extends Authenticatable implements JWTSubject
+{
+    /** @use HasFactory<UserFactory> */
+    use HasFactory, Notifiable;
+
+    protected $attributes = [
+        'status' => 'active',
+    ];
+
+    protected static function booted(): void
+    {
+        static::created(
+            function (User $user): void {
+                if ($user->account_code) {
+                    return;
+                }
+
+                /*
+                 * If role was omitted and the database default
+                 * supplied "user", the model instance may not yet
+                 * contain that database default.
+                 *
+                 * In that case the safe default prefix is BYR.
+                 */
+                $prefix =
+                    $user->role === UserRole::Admin
+                        ? 'ADM'
+                        : 'BYR';
+
+                $user->forceFill([
+                    'account_code' =>
+                        $prefix
+                        .'-'
+                        .str_pad(
+                            (string) $user->id,
+                            6,
+                            '0',
+                            STR_PAD_LEFT
+                        ),
+                ])->saveQuietly();
+            }
+        );
+    }
+
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class);
+    }
+
+    public function disputes(): HasMany
+    {
+        return $this->hasMany(Dispute::class);
+    }
+
+    public function getJWTIdentifier(): mixed
+    {
+        return $this->getKey();
+    }
+
+    public function getJWTCustomClaims(): array
+    {
+        return [
+            'role' =>
+                $this->role->value,
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'email_verified_at' =>
+                'datetime',
+
+            'password' =>
+                'hashed',
+
+            'role' =>
+                UserRole::class,
+
+            'status' =>
+                UserStatus::class,
+        ];
+    }
+}
+
+===== C:\Users\innov8 software - Ab\Desktop\Projects_real\tradeconnect\tests\Feature\Admin\DashboardTest.php =====
+
+<?php
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\FarmerStatus;
+use App\Enums\ListingStatus;
+use App\Enums\OrderStatus;
+use App\Enums\UserRole;
+use App\Models\Category;
+use App\Models\Farmer;
+use App\Models\Listing;
+use App\Models\Order;
+use App\Models\Produce;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
+
+class DashboardTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_admin_can_view_dashboard_stats(): void
+    {
+        $admin = User::factory()->create(['role' => UserRole::Admin]);
+        $buyer = User::factory()->create(['role' => UserRole::User]);
+        User::factory()->create(['role' => UserRole::User]);
+
+        $activeFarmer = Farmer::create([
+            'name' => 'Active Farmer',
+            'state' => 'Niger',
+            'lga' => 'Bida',
+            'status' => FarmerStatus::Active,
+            'phone_number' => '08011111111',
+        ]);
+        Farmer::create([
+            'name' => 'Inactive Farmer',
+            'state' => 'Lagos',
+            'lga' => 'Ikeja',
+            'status' => FarmerStatus::Inactive,
+            'phone_number' => '08022222222',
+        ]);
+
+        $category = Category::create(['name' => 'Grains']);
+        $produce = Produce::create([
+            'category_id' => $category->id,
+            'name' => 'Rice',
+            'image' => base64_encode('rice'),
+            'image_mime' => 'image/jpeg',
+        ]);
+        $listing = Listing::create([
+            'farmer_id' => $activeFarmer->id,
+            'produce_id' => $produce->id,
+            'price' => 45000,
+            'stock' => 20,
+            'status' => ListingStatus::Active,
+        ]);
+        Order::create([
+            'user_id' => $buyer->id,
+            'listing_id' => $listing->id,
+            'quantity' => 1,
+            'total' => 45000,
+            'status' => OrderStatus::New,
+        ]);
+
+        $token = auth('api')->login($admin);
+
+        $this->withToken($token)
+            ->getJson('/api/v1/admin/dashboard')
+            ->assertOk()
+            ->assertJsonPath('data.total_orders', 1)
+            ->assertJsonPath('data.total_listings', 1)
+            ->assertJsonPath('data.active_farmers', 1)
+            ->assertJsonPath('data.active_users', 2);
+    }
+
+    public function test_non_admin_cannot_view_dashboard(): void
+    {
+        $user = User::factory()->create(['role' => UserRole::User]);
+        $token = auth('api')->login($user);
+
+        $this->withToken($token)
+            ->getJson('/api/v1/admin/dashboard')
+            ->assertForbidden();
+    }
+}
+
+===== routes/api.php =====
+
+<?php
+
+use App\Http\Controllers\Api\V1\Admin\BuyerController;
+use App\Http\Controllers\Api\V1\Admin\CategoryController;
+use App\Http\Controllers\Api\V1\Admin\DashboardController;
+use App\Http\Controllers\Api\V1\Admin\DisputeController as AdminDisputeController;
+use App\Http\Controllers\Api\V1\Admin\FarmerController;
+use App\Http\Controllers\Api\V1\Admin\ListingController as AdminListingController;
+use App\Http\Controllers\Api\V1\Admin\ListingImageController as AdminListingImageController;
+use App\Http\Controllers\Api\V1\Admin\OrderController as AdminOrderController;
+use App\Http\Controllers\Api\V1\Admin\ProduceController;
+use App\Http\Controllers\Api\V1\Admin\UserController;
+use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\DisputeController;
+use App\Http\Controllers\Api\V1\ListingController;
+use App\Http\Controllers\Api\V1\OrderController;
+use App\Http\Controllers\Api\V1\PaymentController;
+use App\Http\Middleware\EnsureUserIsActive;
+use Illuminate\Support\Facades\Route;
+
+Route::prefix('v1')->group(function () {
+    Route::get('/health', function () {
+        return response()->json([
+            'status' => 'ok',
+            'service' => config('app.name'),
+        ]);
+    });
+
+    Route::post(
+        '/register',
+        [AuthController::class, 'register']
+    );
+
+    Route::post(
+        '/login',
+        [AuthController::class, 'login']
+    );
+
+    Route::get(
+        'listings',
+        [ListingController::class, 'index']
+    );
+
+    Route::get(
+        'listings/{listing}',
+        [ListingController::class, 'show']
+    );
+
+    Route::middleware([
+        'auth:api',
+        EnsureUserIsActive::class,
+    ])
+        ->group(function () {
+            Route::get(
+                'me',
+                [AuthController::class, 'me']
+            );
+
+            Route::get(
+                'orders',
+                [OrderController::class, 'index']
+            );
+
+            Route::post(
+                'orders',
+                [OrderController::class, 'store']
+            );
+
+            Route::get(
+                'orders/{order}',
+                [OrderController::class, 'show']
+            );
+
+            Route::patch(
+                'orders/{order}/cancel',
+                [OrderController::class, 'cancel']
+            );
+
+            Route::post(
+                'orders/{order}/payment/initialize',
+                [
+                    PaymentController::class,
+                    'initialize',
+                ]
+            );
+
+            Route::post(
+                'orders/{order}/payment/verify',
+                [
+                    PaymentController::class,
+                    'verify',
+                ]
+            );
+
+            /*
+             * Buyer disputes.
+             */
+            Route::get(
+                'disputes',
+                [
+                    DisputeController::class,
+                    'index',
+                ]
+            );
+
+            Route::post(
+                'disputes',
+                [
+                    DisputeController::class,
+                    'store',
+                ]
+            );
+
+            Route::get(
+                'disputes/{dispute}',
+                [
+                    DisputeController::class,
+                    'show',
+                ]
+            );
+
+            Route::patch(
+                'disputes/{dispute}/read',
+                [
+                    DisputeController::class,
+                    'markRead',
+                ]
+            );
+
+            Route::post(
+                'disputes/{dispute}/messages',
+                [
+                    DisputeController::class,
+                    'storeMessage',
+                ]
+            );
+
+            Route::get(
+                'disputes/{dispute}/attachments/{attachment}',
+                [
+                    DisputeController::class,
+                    'downloadAttachment',
+                ]
+            )
+                ->name(
+                    'disputes.attachments.download'
+                );
+        });
+
+    Route::middleware([
+        'auth:api',
+        EnsureUserIsActive::class,
+        'admin',
+    ])
+        ->prefix('admin')
+        ->group(function () {
+            Route::get(
+                'dashboard',
+                DashboardController::class
+            );
+
+            Route::apiResource(
+                'categories',
+                CategoryController::class
+            );
+
+            Route::apiResource(
+                'produce',
+                ProduceController::class
+            );
+
+            Route::patch(
+                'farmers/{farmer}/status',
+                [
+                    FarmerController::class,
+                    'updateStatus',
+                ]
+            );
+
+            Route::patch(
+                'farmers/{farmer}/verification',
+                [
+                    FarmerController::class,
+                    'updateVerification',
+                ]
+            );
+
+            Route::apiResource(
+                'farmers',
+                FarmerController::class
+            );
+
+            Route::get(
+                'listings',
+                [
+                    AdminListingController::class,
+                    'all',
+                ]
+            );
+
+            Route::post(
+                'listings/{listing}/images',
+                [
+                    AdminListingImageController::class,
+                    'store',
+                ]
+            );
+
+            Route::patch(
+                'listings/{listing}/images/reorder',
+                [
+                    AdminListingImageController::class,
+                    'reorder',
+                ]
+            );
+
+            Route::delete(
+                'listings/{listing}/images/{listingImage}',
+                [
+                    AdminListingImageController::class,
+                    'destroy',
+                ]
+            );
+
+            Route::get(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'show',
+                ]
+            );
+
+            Route::put(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'update',
+                ]
+            );
+
+            Route::patch(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'update',
+                ]
+            );
+
+            Route::delete(
+                'listings/{listing}',
+                [
+                    AdminListingController::class,
+                    'destroy',
+                ]
+            );
+
+            Route::get(
+                'farmers/{farmer}/listings',
+                [
+                    AdminListingController::class,
+                    'index',
+                ]
+            );
+
+            Route::post(
+                'farmers/{farmer}/listings',
+                [
+                    AdminListingController::class,
+                    'store',
+                ]
+            );
+
+            Route::get(
+                'farmers/{farmer}/orders',
+                [
+                    AdminOrderController::class,
+                    'farmerIndex',
+                ]
+            );
+
+            Route::get(
+                'orders',
+                [
+                    AdminOrderController::class,
+                    'index',
+                ]
+            );
+
+            Route::get(
+                'orders/{order}',
+                [
+                    AdminOrderController::class,
+                    'show',
+                ]
+            );
+
+            Route::patch(
+                'orders/{order}',
+                [
+                    AdminOrderController::class,
+                    'update',
+                ]
+            );
+
+            Route::get(
+                'users',
+                [
+                    UserController::class,
+                    'index',
+                ]
+            );
+
+            Route::get(
+                'users/{user}',
+                [
+                    UserController::class,
+                    'show',
+                ]
+            );
+
+            Route::get(
+                'buyers',
+                [
+                    BuyerController::class,
+                    'index',
+                ]
+            );
+
+            Route::patch(
+                'buyers/{buyer}/status',
+                [
+                    BuyerController::class,
+                    'updateStatus',
+                ]
+            );
+
+            Route::get(
+                'buyers/{buyer}',
+                [
+                    BuyerController::class,
+                    'show',
+                ]
+            );
+
+            /*
+             * Admin disputes.
+             */
+            Route::get(
+                'disputes',
+                [
+                    AdminDisputeController::class,
+                    'index',
+                ]
+            );
+
+            Route::get(
+                'disputes/{dispute}',
+                [
+                    AdminDisputeController::class,
+                    'show',
+                ]
+            );
+
+            Route::patch(
+                'disputes/{dispute}/read',
+                [
+                    AdminDisputeController::class,
+                    'markRead',
+                ]
+            );
+
+            Route::post(
+                'disputes/{dispute}/messages',
+                [
+                    AdminDisputeController::class,
+                    'storeMessage',
+                ]
+            );
+
+            Route::get(
+                'disputes/{dispute}/attachments/{attachment}',
+                [
+                    AdminDisputeController::class,
+                    'downloadAttachment',
+                ]
+            )
+                ->name(
+                    'admin.disputes.attachments.download'
+                );
+
+            Route::patch(
+                'disputes/{dispute}',
+                [
+                    AdminDisputeController::class,
+                    'update',
+                ]
+            );
+        });
+});

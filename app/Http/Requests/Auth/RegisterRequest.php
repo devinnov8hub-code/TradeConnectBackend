@@ -17,19 +17,58 @@ class RegisterRequest extends ApiFormRequest
     public function rules(): array
     {
         return [
-            'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
-            'password' => ['required', 'string', 'confirmed', Password::defaults()],
-            'role' => ['required', Rule::enum(UserRole::class)],
+            'name' => [
+                'required',
+                'string',
+                'max:255',
+            ],
+
+            'email' => [
+                'required',
+                'string',
+                'email',
+                'max:255',
+                'unique:users,email',
+            ],
+
+            'password' => [
+                'required',
+                'string',
+                'confirmed',
+                Password::defaults(),
+            ],
+
+            /*
+             * PoC behavior:
+             *
+             * Allow the person registering to choose
+             * between the available application roles,
+             * including admin.
+             *
+             * This should be locked down again before
+             * production deployment.
+             */
+            'role' => [
+                'required',
+                Rule::enum(UserRole::class),
+            ],
         ];
     }
 
     public function messages(): array
     {
         return [
-            'email.unique' => 'This email is already registered.',
-            'role.enum' => 'Role must be admin or user.',
-            'password.confirmed' => 'Password confirmation does not match.',
+            'email.unique' =>
+                'This email is already registered.',
+
+            'password.confirmed' =>
+                'Password confirmation does not match.',
+
+            'role.required' =>
+                'A role is required.',
+
+            'role.enum' =>
+                'The selected role is invalid.',
         ];
     }
 }

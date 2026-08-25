@@ -18,8 +18,22 @@ class UpdateDisputeStatusRequest extends ApiFormRequest
         return [
             'status' => [
                 'required',
-                Rule::enum(DisputeStatus::class),
-                Rule::notIn([DisputeStatus::Open->value]),
+
+                Rule::enum(
+                    DisputeStatus::class
+                ),
+
+                Rule::notIn([
+                    DisputeStatus::UnderReview
+                        ->value,
+                ]),
+            ],
+
+            'note' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:5000',
             ],
         ];
     }
@@ -27,9 +41,17 @@ class UpdateDisputeStatusRequest extends ApiFormRequest
     public function messages(): array
     {
         return [
-            'status.required' => 'Status is required.',
-            'status.enum' => 'Status must be resolved or closed.',
-            'status.not_in' => 'Use resolved or closed to update a dispute.',
+            'status.required' =>
+                'Status is required.',
+
+            'status.enum' =>
+                'Status must be resolved or closed.',
+
+            'status.not_in' =>
+                'Use resolved or closed to update a dispute.',
+
+            'note.max' =>
+                'Resolution note cannot exceed 5000 characters.',
         ];
     }
 }
