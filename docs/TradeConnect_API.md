@@ -424,6 +424,53 @@ Only marketplace-visible listings belonging to active, verified farmers are incl
 ```
 
 ---
+## Marketplace Categories
+
+```http
+GET /api/v1/categories
+```
+
+Returns all produce categories available for browsing on the public marketplace, together with the number of currently visible listings in each category.
+
+Categories with no visible marketplace listings are still returned with a `listing_count` of `0`.
+
+A listing is included in the category count only when:
+
+- the listing is active;
+- the listing is published/live;
+- the farmer is active; and
+- the farmer is verified.
+
+**Response `200`**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "name": "Grains & Cereals",
+      "listing_count": 3
+    },
+    {
+      "id": 2,
+      "name": "Fruits",
+      "listing_count": 1
+    },
+    {
+      "id": 3,
+      "name": "Poultry & Eggs",
+      "listing_count": 0
+    }
+  ]
+}
+```
+
+The `listing_count` represents the total number of marketplace-visible listings belonging to produce within that category.
+
+This endpoint is used by the **Browse by Category** section on the public All Listings page.
+
+---
+
 ## Browse Public Listings
 
 ```http
