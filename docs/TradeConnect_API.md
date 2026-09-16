@@ -7,7 +7,7 @@
 **Default format:** JSON  
 **File uploads:** `multipart/form-data`  
 **Authentication:** JWT Bearer token  
-**Last updated:** 18 August 2026
+**Last updated:** 16 September 2026
 
 Trade Connect is a farm-produce marketplace API. Buyers browse verified-farmer listings, create multi-item orders, pay through the Paystack checkout flow, view order history, and raise disputes. Administrators manage farmers, catalog data, listings, orders, buyers, disputes, notifications, dashboard activity, and farmer payouts.
 
@@ -305,10 +305,55 @@ Delivery pricing is listing-based.
 | `pickup` | NGN 0.00 | 24 hours after order placement |
 | `express` | NGN 0.00 | Retained for compatibility; no separate express pricing rule has been approved |
 
-For standard delivery, each listing defines its own delivery charge per purchased unit using:
+For standard delivery, each listing defines its delivery charge per purchased unit using:
 
 ```text
 delivery_fee_per_unit
+```
+
+For each standard-delivery order item:
+
+```text
+item.delivery_total = item.quantity × listing.delivery_fee_per_unit
+```
+
+The parent order delivery fee is:
+
+```text
+order.delivery_fee = sum of all item.delivery_total values
+```
+
+and the final order total is:
+
+```text
+order.total = order.subtotal + order.delivery_fee
+```
+
+Example:
+
+```text
+Listing A:
+quantity = 3
+delivery_fee_per_unit = NGN 500
+delivery_total = NGN 1,500
+
+Listing B:
+quantity = 2
+delivery_fee_per_unit = NGN 800
+delivery_total = NGN 1,600
+
+Order delivery_fee = NGN 3,100
+```
+
+For `pickup`, the parent order delivery fee is always NGN 0.00.
+
+For `express`, the current compatibility behavior keeps the delivery fee at NGN 0.00 until a separate pricing rule is approved.
+
+The backend calculates delivery fees and totals. Clients must not submit `delivery_fee`, `subtotal`, `total`, item `delivery_fee_per_unit`, or item `delivery_total` as authoritative checkout values.
+
+New/modern listing creation requires `delivery_fee_per_unit`. Existing legacy listings may still have `delivery_fee_per_unit = null`; such a listing cannot be used for modern standard-delivery checkout until its fee is configured.
+
+Legacy single-item order payloads that omit delivery fields retain their legacy zero-delivery-fee behavior.
 
 ## Listing publication eligibility
 
@@ -520,8 +565,8 @@ GET /api/v1/listings?min_price=1000&max_price=10000&sort=price&order=asc
   "discount_percent": "9.09",
   "discount_amount": "500.00",
   "unit": "kg",
-"delivery_fee_per_unit": "500.00",
-"stock": 100,
+  "delivery_fee_per_unit": "500.00",
+  "stock": 100,
   "minimum_order_quantity": 1,
   "description": "Fresh tomatoes",
   "label": "fresh",
@@ -950,6 +995,28 @@ Clients must not send authoritative values for:
 - item `unit_price`
 - item `discount_amount`
 - item `line_total`
+- item `delivery_fee_per_unit`
+- item `delivery_total`
+
+For `standard` delivery:
+
+```text
+item.delivery_total = item.quantity × listing.delivery_fee_per_unit
+order.delivery_fee = sum of all item.delivery_total values
+order.total = order.subtotal + order.delivery_fee
+```
+
+Every listing in a modern standard-delivery order must have a configured `delivery_fee_per_unit`. If any listing does not, the order is rejected with a validation error.
+
+For `pickup`:
+
+```text
+order.delivery_fee = 0
+```
+
+For `express`, the current compatibility behavior keeps the delivery fee at `0`.
+
+The frontend may calculate a delivery preview from listing data, but the values returned by the backend after order creation are authoritative.
 
 ### Example
 
@@ -1004,7 +1071,7 @@ Do not mix `items[]` with `listing_id` / `quantity` in the same request.
 
 ## Order Resource
 
-Representative response:
+Representative standard-delivery response:
 
 ```json
 {
@@ -1015,8 +1082,8 @@ Representative response:
     "listing_id": 15,
     "quantity": 2,
     "subtotal": "10000.00",
-    "delivery_fee": "1500.00",
-    "total": "11500.00",
+    "delivery_fee": "1000.00",
+    "total": "11000.00",
     "status": "new",
     "payment_status": "pending",
     "delivery": {
@@ -1040,7 +1107,9 @@ Representative response:
         "quantity": 2,
         "unit_price": "5000.00",
         "discount_amount": "1000.00",
-        "line_total": "10000.00"
+        "line_total": "10000.00",
+        "delivery_fee_per_unit": "500.00",
+        "delivery_total": "1000.00"
       }
     ],
     "placed_at": "...",
@@ -1050,6 +1119,18 @@ Representative response:
   }
 }
 ```
+
+For standard delivery:
+
+```text
+delivery_total = quantity × delivery_fee_per_unit
+```
+
+The parent order's `delivery_fee` is the sum of all item `delivery_total` values.
+
+`delivery_fee_per_unit` and `delivery_total` on each order item are order-time snapshots. Editing the source listing's delivery fee later does not change historical order-item delivery pricing.
+
+For pickup orders, the parent `delivery_fee` is `0.00`.
 
 Compatibility fields `listing_id`, `quantity`, `produce`, and `farmer` may appear for legacy/single-item consumers. New frontend code should use `items[]` as the authoritative purchased-item representation.
 
@@ -1116,13 +1197,13 @@ Clients are prohibited from supplying payment amount, currency, reference, provi
     "reference": "TC-ORD-000030-ABC123...",
     "authorization_url": "https://checkout.paystack.com/...",
     "access_code": "...",
-    "amount": "1150000",
+    "amount": "1100000",
     "currency": "NGN"
   }
 }
 ```
 
-`amount` is in Paystack's lower denomination (kobo).
+`amount` is in Paystack's lower denomination (kobo) and is derived from the server-owned `order.total`, including any standard-delivery fee.
 
 If a pending Paystack checkout is already initialized, the endpoint returns the existing checkout information rather than creating a second checkout.
 
@@ -1922,6 +2003,7 @@ POST /api/v1/admin/farmers/{farmer}/listings
 | `original_price` | number/null | No | >= price |
 | `discount_percent` | number/null | No | 0-100; must match prices within 0.01 |
 | `unit` | string/null | No | max 50; preferred for new clients |
+| `delivery_fee_per_unit` | number | Yes for modern/new frontend clients | >= 0; standard-delivery charge per purchased listing unit |
 | `stock` | integer | Yes | >= 0 |
 | `minimum_order_quantity` | integer | No | >= 1 |
 | `description` | string/null | No | max 5000 |
@@ -1940,6 +2022,7 @@ Recommended create-first-as-pending example:
   "original_price": 5500,
   "discount_percent": 9.09,
   "unit": "kg",
+  "delivery_fee_per_unit": 500,
   "stock": 100,
   "minimum_order_quantity": 1,
   "description": "PoC listing",
@@ -1949,6 +2032,21 @@ Recommended create-first-as-pending example:
   "publication_status": "pending"
 }
 ```
+
+### Delivery price rule
+
+`delivery_fee_per_unit` is the standard-delivery charge for one purchased listing unit.
+
+Example:
+
+```text
+unit = kg
+delivery_fee_per_unit = NGN 500
+buyer quantity = 4
+standard delivery contribution = 4 × NGN 500 = NGN 2,000
+```
+
+The API stores the source value `delivery_fee_per_unit`. Any total delivery-cost figure shown on an Add/Edit Listing screen should be treated as a derived display value rather than a separate authoritative field.
 
 ### Discount rule
 
@@ -1973,7 +2071,9 @@ The original payload remains supported on the farmer-scoped route:
 }
 ```
 
-New frontend code should prefer the richer fields and explicit `publication_status`.
+Legacy-compatible listing creation may omit `delivery_fee_per_unit`, leaving it null. Such a listing must be updated with a delivery fee before it can be used in modern standard-delivery checkout.
+
+New frontend code should use the richer fields, include `delivery_fee_per_unit`, and prefer explicit `publication_status`.
 
 ---
 
@@ -1994,6 +2094,37 @@ PATCH /api/v1/admin/listings/{listing}
 ```
 
 `PUT` is also supported.
+
+The endpoint accepts updates to the listing's editable fields, including:
+
+```text
+farmer_id
+price
+original_price
+discount_percent
+unit
+delivery_fee_per_unit
+stock
+minimum_order_quantity
+description
+label
+grade
+available_from
+status
+publication_status
+```
+
+To update the delivery price per unit:
+
+```json
+{
+  "delivery_fee_per_unit": 750
+}
+```
+
+When supplied, `delivery_fee_per_unit` must be numeric and at least `0`. Do not send `null` to clear the field.
+
+Changing a listing's `delivery_fee_per_unit` affects future orders only. Delivery pricing already snapshotted into existing order items does not change.
 
 To publish:
 
@@ -2572,10 +2703,13 @@ Farmer detail intentionally retains full legacy `listings` and `orders` collecti
 
 ## Money
 
-Treat backend totals as authoritative:
+Treat backend order/payment/payout money values as authoritative:
 
 ```text
 listing price
+order item line total
+order item delivery_fee_per_unit snapshot
+order item delivery_total
 order subtotal
 delivery fee
 order total
@@ -2583,11 +2717,53 @@ payment amount
 payout amount
 ```
 
-Never calculate a client total and send it as authoritative.
+The frontend may calculate previews for display, but must never send a calculated client total or calculated delivery amount as authoritative.
 
 ## Standard delivery
 
-The frontend may display NGN 1,500 for standard delivery, but the backend recalculates it.
+Standard delivery is not a fixed platform-wide amount.
+
+Each listing exposes:
+
+```text
+delivery_fee_per_unit
+```
+
+For an item, the frontend may preview:
+
+```text
+estimated item delivery = quantity × delivery_fee_per_unit
+```
+
+For multiple cart items:
+
+```text
+estimated delivery = sum(quantity × delivery_fee_per_unit)
+```
+
+After the order is created, use the backend-returned values as authoritative:
+
+```text
+items[].delivery_fee_per_unit
+items[].delivery_total
+subtotal
+delivery_fee
+total
+```
+
+Do not send calculated delivery amounts to the API.
+
+For pickup:
+
+```text
+delivery_fee = NGN 0.00
+```
+
+For express, the current compatibility fee remains NGN 0.00 until a separate express pricing rule is approved.
+
+If a listing has no configured `delivery_fee_per_unit`, modern standard-delivery checkout is rejected until that listing is updated.
+
+On Add/Edit Listing screens, submit `delivery_fee_per_unit`. Any displayed "total delivery cost" should be derived in the UI; it is not a separate listing field that the backend stores.
 
 ## Order statuses
 
@@ -2695,7 +2871,7 @@ The following routes were discussed during parity review but are intentionally n
 |---|---|
 | `POST /refresh` | Not implemented; not required for PoC demo |
 | State/LGA reference endpoints | Not implemented; frontend may use static Nigerian location data |
-| `GET /delivery-methods` | Not implemented; frontend may use approved methods/fees while server remains authoritative |
+| `GET /delivery-methods` | Not implemented; frontend may use the approved delivery method names statically. Standard pricing comes from each listing's `delivery_fee_per_unit`; backend checkout totals remain authoritative |
 | `GET /listings/{listing}/similar` | Not separate; use filtered public listing query and exclude current listing client-side |
 | `POST /checkout/quote` | Not separate; `POST /orders` recalculates and validates checkout server-side |
 | `GET /payments/{reference}/verify` | Not used; verify by parent order via `/orders/{order}/payment/verify` |
@@ -2849,6 +3025,7 @@ These are not considered backend-parity defects for the current PoC because the 
 - This document describes the PoC/Figma-parity backend contract, including the produce-image filesystem migration.
 - Existing v1 compatibility fields are intentionally documented where they remain part of the API.
 - New frontend code should prefer multi-item `items[]`, `publication_status`, URL-based media fields, and `workflow_status` where applicable.
-- The server remains authoritative for money, delivery fee, stock validation, payment state, fulfillment state, listing publication eligibility, and farmer payout amounts.
+- Standard delivery pricing is listing-based: `quantity × delivery_fee_per_unit`; pickup remains NGN 0.00.
+- The server remains authoritative for money, delivery fee, order-item delivery snapshots, stock validation, payment state, fulfillment state, listing publication eligibility, and farmer payout amounts.
 - The accompanying Postman collection can be used as an executable reference for the main requests and workflows.
 
