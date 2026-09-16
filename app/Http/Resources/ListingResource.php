@@ -79,6 +79,9 @@ class ListingResource extends JsonResource
             'minimum_order_quantity' =>
                 $this->minimum_order_quantity,
 
+            'delivery_fee_per_unit' =>
+                $this->delivery_fee_per_unit,
+
             'description' =>
                 $this->description,
 

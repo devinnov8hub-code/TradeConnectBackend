@@ -80,6 +80,12 @@ class UpdateListingRequest extends ApiFormRequest
                 'min:1',
             ],
 
+            'delivery_fee_per_unit' => [
+                'sometimes',
+                'numeric',
+                'min:0',
+            ],
+
             'description' => [
                 'sometimes',
                 'nullable',
@@ -163,6 +169,9 @@ class UpdateListingRequest extends ApiFormRequest
 
             'minimum_order_quantity.min' =>
                 'Minimum order quantity must be at least 1.',
+
+            'delivery_fee_per_unit.min' =>
+                'Delivery fee per unit must be at least 0.',
 
             'description.max' =>
                 'Description cannot exceed 5000 characters.',

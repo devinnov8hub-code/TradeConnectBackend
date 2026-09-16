@@ -20,6 +20,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'unit',
     'stock',
     'minimum_order_quantity',
+    'delivery_fee_per_unit',
 
     'description',
     'label',
@@ -96,6 +97,9 @@ class Listing extends Model
                 'decimal:2',
 
             'minimum_order_quantity' =>
+                'decimal:2',
+
+            'delivery_fee_per_unit' =>
                 'decimal:2',
 
             'available_from' =>

@@ -60,6 +60,7 @@ class OrderTest extends TestCase
         ListingStatus $status = ListingStatus::Active,
         string $farmerName = 'Ibrahim Musa',
         string $categoryName = 'Grains',
+        string $deliveryFeePerUnit = '500.00',
     ): Listing {
         $farmer = Farmer::firstOrCreate(
             [
@@ -96,6 +97,8 @@ class OrderTest extends TestCase
             'farmer_id' => $farmer->id,
             'produce_id' => $produce->id,
             'price' => $price,
+            'delivery_fee_per_unit' =>
+                $deliveryFeePerUnit,
             'stock' => $stock,
             'status' => $status,
         ]);
@@ -235,7 +238,7 @@ public function test_delivery_information_is_required(): void
     );
 }
 
-public function test_delivery_method_must_be_standard_or_express(): void
+public function test_delivery_method_must_be_standard_express_or_pickup(): void
 {
     $listing = $this->createListing();
 
@@ -267,6 +270,59 @@ public function test_delivery_method_must_be_standard_or_express(): void
     );
 }
 
+    public function test_pickup_delivery_is_free(): void
+    {
+        $listing = $this->createListing(
+            price: '1500.00',
+            deliveryFeePerUnit: '750.00'
+        );
+
+        $response = $this
+            ->withToken($this->userToken())
+            ->postJson('/api/v1/orders', [
+                'items' => [
+                    [
+                        'listing_id' =>
+                            $listing->id,
+
+                        'quantity' => 2,
+                    ],
+                ],
+
+                ...$this->deliveryData([
+                    'delivery_method' =>
+                        'pickup',
+                ]),
+            ]);
+
+        $response
+            ->assertCreated()
+            ->assertJsonPath(
+                'data.delivery.method',
+                'pickup'
+            )
+            ->assertJsonPath(
+                'data.subtotal',
+                '3000.00'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee',
+                '0.00'
+            )
+            ->assertJsonPath(
+                'data.total',
+                '3000.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '0.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '0.00'
+            );
+    }
+
     public function test_buyer_can_create_order_with_multiple_items(): void
     {
         $rice = $this->createListing(
@@ -275,6 +331,7 @@ public function test_delivery_method_must_be_standard_or_express(): void
             stock: 100,
             farmerName: 'Ibrahim Musa',
             categoryName: 'Grains',
+            deliveryFeePerUnit: '500.00',
         );
 
         $tomatoes = $this->createListing(
@@ -283,6 +340,7 @@ public function test_delivery_method_must_be_standard_or_express(): void
             stock: 50,
             farmerName: 'Aisha Bello',
             categoryName: 'Vegetables',
+            deliveryFeePerUnit: '800.00',
         );
 
         $response = $this
@@ -310,11 +368,11 @@ public function test_delivery_method_must_be_standard_or_express(): void
             )
             ->assertJsonPath(
                 'data.delivery_fee',
-                '0.00'
+                '5000.00'
             )
             ->assertJsonPath(
                 'data.total',
-                '102500.00'
+                '107500.00'
             )
             ->assertJsonPath(
                 'data.payment_status',
@@ -341,6 +399,14 @@ public function test_delivery_method_must_be_standard_or_express(): void
                 '90000.00'
             )
             ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '1000.00'
+            )
+            ->assertJsonPath(
                 'data.items.1.produce_name',
                 'Tomatoes'
             )
@@ -355,6 +421,14 @@ public function test_delivery_method_must_be_standard_or_express(): void
             ->assertJsonPath(
                 'data.items.1.line_total',
                 '12500.00'
+            )
+            ->assertJsonPath(
+                'data.items.1.delivery_fee_per_unit',
+                '800.00'
+            )
+            ->assertJsonPath(
+                'data.items.1.delivery_total',
+                '4000.00'
             )
             ->assertJsonCount(
                 2,
@@ -373,7 +447,8 @@ public function test_delivery_method_must_be_standard_or_express(): void
         $this->assertDatabaseHas('orders', [
             'id' => $orderId,
             'subtotal' => 102500,
-            'total' => 102500,
+            'delivery_fee' => 5000,
+            'total' => 107500,
             'payment_status' => 'pending',
         ]);
 
@@ -383,7 +458,9 @@ public function test_delivery_method_must_be_standard_or_express(): void
             'produce_name' => 'Rice',
             'quantity' => 2,
             'unit_price' => 45000,
+            'delivery_fee_per_unit' => 500,
             'line_total' => 90000,
+            'delivery_total' => 1000,
         ]);
 
         $this->assertDatabaseHas('order_items', [
@@ -392,7 +469,9 @@ public function test_delivery_method_must_be_standard_or_express(): void
             'produce_name' => 'Tomatoes',
             'quantity' => 5,
             'unit_price' => 2500,
+            'delivery_fee_per_unit' => 800,
             'line_total' => 12500,
+            'delivery_total' => 4000,
         ]);
 
         $this->assertDatabaseHas('listings', [
@@ -409,7 +488,8 @@ public function test_delivery_method_must_be_standard_or_express(): void
     public function test_order_total_is_calculated_by_server(): void
     {
         $listing = $this->createListing(
-            price: '1250.50'
+            price: '1250.50',
+            deliveryFeePerUnit: '125.25'
         );
 
         $response = $this
@@ -440,8 +520,20 @@ public function test_delivery_method_must_be_standard_or_express(): void
                 '5002.00'
             )
             ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '125.25'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '501.00'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee',
+                '501.00'
+            )
+            ->assertJsonPath(
                 'data.total',
-                '5002.00'
+                '5503.00'
             );
     }
 
@@ -457,12 +549,15 @@ public function test_delivery_method_must_be_standard_or_express(): void
                     'listing_id' => $listing->id,
                     'quantity' => 2,
 
-                    // Client attempts to manipulate the price.
+                    // Client attempts to manipulate server-owned prices.
                     'unit_price' => 1,
+                    'delivery_fee_per_unit' => 1,
+                    'delivery_total' => 1,
                 ],
             ],
 
-            // Client attempts to manipulate the order total.
+            // Client attempts to manipulate order totals.
+            'delivery_fee' => 1,
             'total' => 1,
 
             // Everything else about checkout is valid.
@@ -471,6 +566,9 @@ public function test_delivery_method_must_be_standard_or_express(): void
         ->assertUnprocessable()
         ->assertJsonValidationErrors([
             'items.0.unit_price',
+            'items.0.delivery_fee_per_unit',
+            'items.0.delivery_total',
+            'delivery_fee',
             'total',
         ]);
 

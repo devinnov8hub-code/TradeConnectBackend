@@ -389,6 +389,9 @@ class OrderTimelineTest extends TestCase
             'price' =>
                 45000,
 
+            'delivery_fee_per_unit' =>
+                500,
+
             'unit' =>
                 'bag',
 

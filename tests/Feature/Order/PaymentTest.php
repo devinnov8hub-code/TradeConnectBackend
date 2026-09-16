@@ -138,6 +138,219 @@ class PaymentTest extends TestCase
         );
     }
 
+    public function test_paystack_uses_server_calculated_delivery_total_when_initializing_payment(): void
+    {
+        $buyer =
+            User::factory()->create([
+                'role' =>
+                    UserRole::User,
+            ]);
+
+        $farmer =
+            Farmer::create([
+                'name' =>
+                    'Delivery Pricing Farmer',
+
+                'state' =>
+                    'Kaduna',
+
+                'lga' =>
+                    'Kagarko',
+
+                'status' =>
+                    FarmerStatus::Active,
+
+                'phone_number' =>
+                    '08012345678',
+            ]);
+
+        $category =
+            Category::create([
+                'name' =>
+                    'Grains',
+            ]);
+
+        $produce =
+            Produce::create([
+                'category_id' =>
+                    $category->id,
+
+                'name' =>
+                    'Rice',
+
+                'image' =>
+                    base64_encode('rice'),
+
+                'image_mime' =>
+                    'image/jpeg',
+            ]);
+
+        $listing =
+            Listing::create([
+                'farmer_id' =>
+                    $farmer->id,
+
+                'produce_id' =>
+                    $produce->id,
+
+                'price' =>
+                    5000,
+
+                'unit' =>
+                    'kg',
+
+                'stock' =>
+                    100,
+
+                'delivery_fee_per_unit' =>
+                    500,
+
+                'status' =>
+                    ListingStatus::Active,
+            ]);
+
+        $token = auth('api')->login(
+            $buyer
+        );
+
+        $orderResponse = $this
+            ->withToken($token)
+            ->postJson(
+                '/api/v1/orders',
+                [
+                    'items' => [
+                        [
+                            'listing_id' =>
+                                $listing->id,
+
+                            'quantity' =>
+                                2,
+                        ],
+                    ],
+
+                    'delivery_method' =>
+                        'standard',
+
+                    'delivery_name' =>
+                        'Paystack Buyer',
+
+                    'delivery_phone' =>
+                        '08099998888',
+
+                    'delivery_state' =>
+                        'Lagos',
+
+                    'delivery_lga' =>
+                        'Ikeja',
+
+                    'delivery_address' =>
+                        '12 Allen Avenue, Ikeja',
+
+                    'delivery_notes' =>
+                        'Payment integration test',
+                ]
+            );
+
+        $orderResponse
+            ->assertCreated()
+            ->assertJsonPath(
+                'data.subtotal',
+                '10000.00'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee',
+                '1000.00'
+            )
+            ->assertJsonPath(
+                'data.total',
+                '11000.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '1000.00'
+            );
+
+        $orderId = $orderResponse->json(
+            'data.id'
+        );
+
+        $this->assertDatabaseHas(
+            'orders',
+            [
+                'id' =>
+                    $orderId,
+
+                'subtotal' =>
+                    10000,
+
+                'delivery_fee' =>
+                    1000,
+
+                'total' =>
+                    11000,
+            ]
+        );
+
+        Http::fake(
+            function (Request $request) {
+                return Http::response([
+                    'status' => true,
+                    'message' =>
+                        'Authorization URL created',
+
+                    'data' => [
+                        'authorization_url' =>
+                            'https://checkout.paystack.com/delivery-test',
+
+                        'access_code' =>
+                            'delivery-test',
+
+                        'reference' =>
+                            $request['reference'],
+                    ],
+                ], 200);
+            }
+        );
+
+        $paymentResponse = $this
+            ->withToken($token)
+            ->postJson(
+                "/api/v1/orders/{$orderId}/payment/initialize"
+            );
+
+        $paymentResponse
+            ->assertOk()
+            ->assertJsonPath(
+                'data.amount',
+                '1100000'
+            )
+            ->assertJsonPath(
+                'data.currency',
+                'NGN'
+            );
+
+        Http::assertSent(
+            function (
+                Request $request
+            ) use ($buyer) {
+                return $request['email']
+                        === $buyer->email
+                    && $request['amount']
+                        === '1100000'
+                    && $request['currency']
+                        === 'NGN'
+                    && $request->hasHeader(
+                        'Authorization',
+                        'Bearer sk_test_tradeconnect'
+                    );
+            }
+        );
+    }
+
     public function test_client_cannot_choose_payment_amount_or_reference(): void
     {
         [$buyer, $order] =

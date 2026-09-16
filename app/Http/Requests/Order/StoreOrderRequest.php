@@ -264,6 +264,14 @@ class StoreOrderRequest extends ApiFormRequest
             'items.*.line_total' => [
                 'prohibited',
             ],
+
+            'items.*.delivery_fee_per_unit' => [
+                'prohibited',
+            ],
+
+            'items.*.delivery_total' => [
+                'prohibited',
+            ],
         ];
     }
 
@@ -319,7 +327,7 @@ class StoreOrderRequest extends ApiFormRequest
                 'Delivery method is required.',
 
             'delivery_method.enum' =>
-                'Delivery method must be standard or express.',
+                'Delivery method must be standard, express, or pickup.',
 
             'delivery_name.required' =>
                 'Delivery name is required.',
@@ -365,6 +373,12 @@ class StoreOrderRequest extends ApiFormRequest
 
             'items.*.line_total.prohibited' =>
                 'Line total is calculated by the server.',
+
+            'items.*.delivery_fee_per_unit.prohibited' =>
+                'Delivery fee per unit is calculated by the server.',
+
+            'items.*.delivery_total.prohibited' =>
+                'Delivery total is calculated by the server.',
         ];
     }
 
@@ -456,6 +470,11 @@ class StoreOrderRequest extends ApiFormRequest
                     ->get()
                     ->keyBy('id');
 
+                $deliveryMethod =
+                    $this->input(
+                        'delivery_method'
+                    );
+
                 foreach (
                     $items
                     as $index => $item
@@ -530,6 +549,28 @@ class StoreOrderRequest extends ApiFormRequest
                             );
 
                         continue;
+                    }
+
+                    /*
+                     * Standard delivery requires a configured
+                     * per-unit delivery price on every listing.
+                     *
+                     * Pickup and legacy checkout remain free.
+                     * Express retains its existing zero-fee
+                     * behaviour until a separate rule is approved.
+                     */
+                    if (
+                        $deliveryMethod
+                            === DeliveryMethod::Standard->value
+                        && $listing->delivery_fee_per_unit
+                            === null
+                    ) {
+                        $validator
+                            ->errors()
+                            ->add(
+                                $listingErrorKey,
+                                'This listing does not have a delivery fee configured.'
+                            );
                     }
 
                     $minimumQuantity =
