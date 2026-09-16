@@ -297,15 +297,18 @@ Rules:
 
 ## Delivery pricing
 
+Delivery pricing is listing-based.
+
 | Method | Fee | Deliver-by behavior |
-|---|---:|---|
-| `standard` | NGN 1,500.00 | Conservative upper bound: 3 business days |
+|---|---|---|
+| `standard` | Sum of `quantity × listing.delivery_fee_per_unit` for all order items | Conservative upper bound: 3 business days |
 | `pickup` | NGN 0.00 | 24 hours after order placement |
-| `express` | NGN 0.00 | Retained for compatibility; no approved express fee yet |
+| `express` | NGN 0.00 | Retained for compatibility; no separate express pricing rule has been approved |
 
-The server calculates delivery fees. Clients must not send `delivery_fee`, `subtotal`, or `total` as authoritative values.
+For standard delivery, each listing defines its own delivery charge per purchased unit using:
 
-Legacy single-item order payloads that omit delivery fields retain their legacy zero-delivery-fee behavior.
+```text
+delivery_fee_per_unit
 
 ## Listing publication eligibility
 
