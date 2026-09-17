@@ -56,6 +56,7 @@ class OrderItemTest extends TestCase
             'farmer_id' => $farmer->id,
             'produce_id' => $yam->id,
             'price' => 1100,
+            'delivery_fee_per_unit' => 80,
             'stock' => 100,
             'status' => ListingStatus::Active,
         ]);
@@ -64,6 +65,7 @@ class OrderItemTest extends TestCase
             'farmer_id' => $farmer->id,
             'produce_id' => $sweetPotatoes->id,
             'price' => 1040,
+            'delivery_fee_per_unit' => 120,
             'stock' => 100,
             'status' => ListingStatus::Active,
         ]);
@@ -94,8 +96,10 @@ class OrderItemTest extends TestCase
             'unit' => 'kg',
             'quantity' => 5,
             'unit_price' => 1100,
+            'delivery_fee_per_unit' => 80,
             'discount_amount' => 0,
             'line_total' => 5500,
+            'delivery_total' => 400,
         ]);
 
         OrderItem::create([
@@ -108,8 +112,10 @@ class OrderItemTest extends TestCase
             'unit' => 'kg',
             'quantity' => 5,
             'unit_price' => 1040,
+            'delivery_fee_per_unit' => 120,
             'discount_amount' => 0,
             'line_total' => 5200,
+            'delivery_total' => 600,
         ]);
 
         $order->load('items');
@@ -125,14 +131,18 @@ class OrderItemTest extends TestCase
             'order_id' => $order->id,
             'produce_name' => 'Yam',
             'quantity' => 5,
+            'delivery_fee_per_unit' => 80,
             'line_total' => 5500,
+            'delivery_total' => 400,
         ]);
 
         $this->assertDatabaseHas('order_items', [
             'order_id' => $order->id,
             'produce_name' => 'Sweet Potatoes',
             'quantity' => 5,
+            'delivery_fee_per_unit' => 120,
             'line_total' => 5200,
+            'delivery_total' => 600,
         ]);
     }
 }

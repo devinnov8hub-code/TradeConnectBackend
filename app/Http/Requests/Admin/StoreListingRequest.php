@@ -124,6 +124,22 @@ class StoreListingRequest extends ApiFormRequest
                 'min:1',
             ],
 
+            /*
+             * New delivery-pricing model.
+             *
+             * Modern listing creation must provide a
+             * per-unit delivery price. Original v1 callers
+             * remain supported during the compatibility
+             * period.
+             */
+            'delivery_fee_per_unit' => [
+                $this->legacyOriginalPayload
+                    ? 'sometimes'
+                    : 'required',
+                'numeric',
+                'min:0',
+            ],
+
             'description' => [
                 'nullable',
                 'string',
@@ -212,6 +228,12 @@ class StoreListingRequest extends ApiFormRequest
 
             'minimum_order_quantity.min' =>
                 'Minimum order quantity must be at least 1.',
+
+            'delivery_fee_per_unit.required' =>
+                'Delivery fee per unit is required.',
+
+            'delivery_fee_per_unit.min' =>
+                'Delivery fee per unit must be at least 0.',
 
             'description.max' =>
                 'Description cannot exceed 5000 characters.',

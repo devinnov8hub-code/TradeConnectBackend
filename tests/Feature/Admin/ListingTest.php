@@ -43,6 +43,7 @@ class ListingTest extends TestCase
             'price' => 45000,
             'unit' => 'bag',
             'stock' => 120,
+            'delivery_fee_per_unit' => 500,
             'status' => ListingStatus::Active,
         ]);
 
@@ -108,6 +109,9 @@ class ListingTest extends TestCase
                     'stock' =>
                         120,
 
+                    'delivery_fee_per_unit' =>
+                        500,
+
                     'status' =>
                         ListingStatus::Active->value,
                 ]
@@ -136,6 +140,10 @@ class ListingTest extends TestCase
                 120
             )
             ->assertJsonPath(
+                'data.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
                 'data.status',
                 ListingStatus::Active->value
             );
@@ -151,6 +159,9 @@ class ListingTest extends TestCase
 
                 'unit' =>
                     'bag',
+
+                'delivery_fee_per_unit' =>
+                    '500.00',
             ]
         );
     }
@@ -181,6 +192,9 @@ class ListingTest extends TestCase
 
             'stock' =>
                 120,
+
+            'delivery_fee_per_unit' =>
+                500,
 
             'status' =>
                 ListingStatus::Active,
@@ -219,6 +233,10 @@ class ListingTest extends TestCase
             ->assertJsonPath(
                 'data.stock',
                 80
+            )
+            ->assertJsonPath(
+                'data.delivery_fee_per_unit',
+                '500.00'
             );
 
         $this->assertDatabaseHas(
@@ -267,6 +285,9 @@ class ListingTest extends TestCase
                     'stock' =>
                         120,
 
+                    'delivery_fee_per_unit' =>
+                        500,
+
                     'status' =>
                         ListingStatus::Active->value,
                 ]
@@ -304,6 +325,9 @@ class ListingTest extends TestCase
             'stock' =>
                 120,
 
+            'delivery_fee_per_unit' =>
+                500,
+
             'status' =>
                 ListingStatus::Active,
         ]);
@@ -324,6 +348,9 @@ class ListingTest extends TestCase
 
                     'stock' =>
                         50,
+
+                    'delivery_fee_per_unit' =>
+                        500,
 
                     'status' =>
                         ListingStatus::Active->value,

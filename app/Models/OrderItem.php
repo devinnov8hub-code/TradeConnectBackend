@@ -16,37 +16,58 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'unit',
     'quantity',
     'unit_price',
+    'delivery_fee_per_unit',
     'discount_amount',
     'line_total',
+    'delivery_total',
 ])]
 class OrderItem extends Model
 {
     protected function casts(): array
     {
         return [
-            'unit_price' => 'decimal:2',
-            'discount_amount' => 'decimal:2',
-            'line_total' => 'decimal:2',
+            'unit_price' =>
+                'decimal:2',
+
+            'delivery_fee_per_unit' =>
+                'decimal:2',
+
+            'discount_amount' =>
+                'decimal:2',
+
+            'line_total' =>
+                'decimal:2',
+
+            'delivery_total' =>
+                'decimal:2',
         ];
     }
 
     public function order(): BelongsTo
     {
-        return $this->belongsTo(Order::class);
+        return $this->belongsTo(
+            Order::class
+        );
     }
 
     public function listing(): BelongsTo
     {
-        return $this->belongsTo(Listing::class);
+        return $this->belongsTo(
+            Listing::class
+        );
     }
 
     public function farmer(): BelongsTo
     {
-        return $this->belongsTo(Farmer::class);
+        return $this->belongsTo(
+            Farmer::class
+        );
     }
 
     public function produce(): BelongsTo
     {
-        return $this->belongsTo(Produce::class);
+        return $this->belongsTo(
+            Produce::class
+        );
     }
 }

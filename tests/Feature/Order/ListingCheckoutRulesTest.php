@@ -210,8 +210,12 @@ class ListingCheckoutRulesTest extends TestCase
                 '90000.00'
             )
             ->assertJsonPath(
+                'data.delivery_fee',
+                '1000.00'
+            )
+            ->assertJsonPath(
                 'data.total',
-                '90000.00'
+                '91000.00'
             )
             ->assertJsonPath(
                 'data.items.0.unit_price',
@@ -224,6 +228,14 @@ class ListingCheckoutRulesTest extends TestCase
             ->assertJsonPath(
                 'data.items.0.line_total',
                 '90000.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '1000.00'
             );
 
         $orderId =
@@ -246,11 +258,17 @@ class ListingCheckoutRulesTest extends TestCase
                 'unit_price' =>
                     '45000.00',
 
+                'delivery_fee_per_unit' =>
+                    '500.00',
+
                 'discount_amount' =>
                     '10000.00',
 
                 'line_total' =>
                     '90000.00',
+
+                'delivery_total' =>
+                    '1000.00',
             ]
         );
 
@@ -264,10 +282,10 @@ class ListingCheckoutRulesTest extends TestCase
                     '90000.00',
 
                 'delivery_fee' =>
-                    '0.00',
+                    '1000.00',
 
                 'total' =>
-                    '90000.00',
+                    '91000.00',
             ]
         );
 
@@ -333,6 +351,161 @@ class ListingCheckoutRulesTest extends TestCase
             'orders',
             0
         );
+    }
+
+    public function test_standard_delivery_rejects_listing_without_delivery_fee(): void
+    {
+        $buyer =
+            $this->createBuyer();
+
+        $listing =
+            $this->createListing([
+                'delivery_fee_per_unit' =>
+                    null,
+            ]);
+
+        $this
+            ->withToken(
+                auth('api')->login(
+                    $buyer
+                )
+            )
+            ->postJson(
+                '/api/v1/orders',
+                $this->orderPayload(
+                    $listing->id,
+                    2
+                )
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'items.0.listing_id',
+            ])
+            ->assertJsonFragment([
+                'This listing does not have a delivery fee configured.',
+            ]);
+
+        $this->assertDatabaseCount(
+            'orders',
+            0
+        );
+    }
+
+    public function test_client_cannot_override_delivery_prices(): void
+    {
+        $buyer =
+            $this->createBuyer();
+
+        $listing =
+            $this->createListing();
+
+        $payload =
+            $this->orderPayload(
+                $listing->id,
+                2
+            );
+
+        $payload['delivery_fee'] =
+            1;
+
+        $payload['items'][0][
+            'delivery_fee_per_unit'
+        ] = 1;
+
+        $payload['items'][0][
+            'delivery_total'
+        ] = 1;
+
+        $this
+            ->withToken(
+                auth('api')->login(
+                    $buyer
+                )
+            )
+            ->postJson(
+                '/api/v1/orders',
+                $payload
+            )
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'delivery_fee',
+                'items.0.delivery_fee_per_unit',
+                'items.0.delivery_total',
+            ]);
+
+        $this->assertDatabaseCount(
+            'orders',
+            0
+        );
+    }
+
+    public function test_delivery_snapshot_does_not_change_when_listing_fee_changes(): void
+    {
+        $buyer =
+            $this->createBuyer();
+
+        $listing =
+            $this->createListing([
+                'delivery_fee_per_unit' =>
+                    500,
+            ]);
+
+        $token =
+            auth('api')->login(
+                $buyer
+            );
+
+        $response = $this
+            ->withToken($token)
+            ->postJson(
+                '/api/v1/orders',
+                $this->orderPayload(
+                    $listing->id,
+                    2
+                )
+            )
+            ->assertCreated()
+            ->assertJsonPath(
+                'data.delivery_fee',
+                '1000.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '1000.00'
+            );
+
+        $orderId =
+            $response->json(
+                'data.id'
+            );
+
+        $listing->update([
+            'delivery_fee_per_unit' =>
+                900,
+        ]);
+
+        $this
+            ->withToken($token)
+            ->getJson(
+                "/api/v1/orders/{$orderId}"
+            )
+            ->assertOk()
+            ->assertJsonPath(
+                'data.delivery_fee',
+                '1000.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '1000.00'
+            );
     }
 
     private function createBuyer(): User
@@ -411,6 +584,9 @@ class ListingCheckoutRulesTest extends TestCase
 
                     'minimum_order_quantity' =>
                         1,
+
+                    'delivery_fee_per_unit' =>
+                        500,
 
                     'publication_status' =>
                         ListingPublicationStatus::Live,

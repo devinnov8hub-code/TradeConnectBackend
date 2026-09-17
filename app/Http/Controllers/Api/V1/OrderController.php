@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Enums\DeliveryMethod;
 use App\Enums\ListingPublicationStatus;
 use App\Enums\ListingStatus;
 use App\Enums\OrderStatus;
@@ -198,6 +199,15 @@ class OrderController extends Controller
                 $preparedItems = [];
                 $subtotal = '0.00';
 
+                $deliveryMethod =
+                    $validated[
+                        'delivery_method'
+                    ]
+                    ?? null;
+
+                $deliveryFee =
+                    '0.00';
+
                 /*
                  * Revalidate every commercial rule
                  * while the listing rows are locked.
@@ -348,6 +358,60 @@ class OrderController extends Controller
                             );
                     }
 
+                    /*
+                     * Delivery pricing is server-owned.
+                     *
+                     * Standard:
+                     * quantity x listing delivery fee per unit.
+                     *
+                     * Pickup:
+                     * free.
+                     *
+                     * Express:
+                     * retained for backward compatibility and
+                     * keeps its existing zero-fee behaviour until
+                     * a separate express-pricing rule is approved.
+                     */
+                    $deliveryFeePerUnit =
+                        '0.00';
+
+                    $deliveryTotal =
+                        '0.00';
+
+                    if (
+                        $deliveryMethod
+                            === DeliveryMethod::Standard->value
+                    ) {
+                        if (
+                            $listing->delivery_fee_per_unit
+                            === null
+                        ) {
+                            throw ValidationException::withMessages([
+                                "items.{$index}.listing_id" => [
+                                    'This listing does not have a delivery fee configured.',
+                                ],
+                            ]);
+                        }
+
+                        $deliveryFeePerUnit =
+                            (string) $listing
+                                ->delivery_fee_per_unit;
+
+                        $deliveryTotal =
+                            bcmul(
+                                $deliveryFeePerUnit,
+                                (string) $quantity,
+                                2
+                            );
+
+                        $deliveryFee =
+                            bcadd(
+                                $deliveryFee,
+                                $deliveryTotal,
+                                2
+                            );
+                    }
+
                     $subtotal =
                         bcadd(
                             $subtotal,
@@ -388,24 +452,22 @@ class OrderController extends Controller
                         'unit_price' =>
                             $unitPrice,
 
+                        'delivery_fee_per_unit' =>
+                            $deliveryFeePerUnit,
+
                         'discount_amount' =>
                             $discountAmount,
 
                         'line_total' =>
                             $lineTotal,
+
+                        'delivery_total' =>
+                            $deliveryTotal,
                     ];
                 }
 
                 $firstItem =
                     $preparedItems[0];
-
-                /*
-                 * Delivery pricing remains server-owned,
-                 * but no business delivery-fee rule has
-                 * been confirmed yet.
-                 */
-                $deliveryFee =
-                    '0.00';
 
                 $total =
                     bcadd(
@@ -450,9 +512,7 @@ class OrderController extends Controller
                      * Delivery snapshot.
                      */
                     'delivery_method' =>
-                        $validated[
-                            'delivery_method'
-                        ],
+                        $deliveryMethod,
 
                     'delivery_name' =>
                         $validated[

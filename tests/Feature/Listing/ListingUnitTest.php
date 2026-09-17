@@ -35,6 +35,10 @@ class ListingUnitTest extends TestCase
             ->assertJsonPath(
                 'data.price',
                 '45000.00'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee_per_unit',
+                '500.00'
             );
     }
 
@@ -96,6 +100,22 @@ class ListingUnitTest extends TestCase
             ->assertJsonPath(
                 'data.items.0.unit',
                 'bag'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
+                'data.items.0.delivery_total',
+                '1000.00'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee',
+                '1000.00'
+            )
+            ->assertJsonPath(
+                'data.total',
+                '91000.00'
             );
 
         $orderId = $response->json(
@@ -116,6 +136,12 @@ class ListingUnitTest extends TestCase
 
                 'quantity' =>
                     2,
+
+                'delivery_fee_per_unit' =>
+                    '500.00',
+
+                'delivery_total' =>
+                    '1000.00',
             ]
         );
 
@@ -207,6 +233,9 @@ class ListingUnitTest extends TestCase
 
             'stock' =>
                 100,
+
+            'delivery_fee_per_unit' =>
+                500,
 
             'status' =>
                 ListingStatus::Active,

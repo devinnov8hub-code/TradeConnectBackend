@@ -57,6 +57,9 @@ class ListingRichnessTest extends TestCase
                     'minimum_order_quantity' =>
                         2,
 
+                    'delivery_fee_per_unit' =>
+                        500,
+
                     'description' =>
                         'Premium locally grown rice from Niger State.',
 
@@ -96,6 +99,10 @@ class ListingRichnessTest extends TestCase
             ->assertJsonPath(
                 'data.minimum_order_quantity',
                 '2.00'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee_per_unit',
+                '500.00'
             )
             ->assertJsonPath(
                 'data.description',
@@ -152,6 +159,9 @@ class ListingRichnessTest extends TestCase
                 'minimum_order_quantity' =>
                     '2.00',
 
+                'delivery_fee_per_unit' =>
+                    '500.00',
+
                 'original_price' =>
                     '50000.00',
 
@@ -203,6 +213,9 @@ class ListingRichnessTest extends TestCase
 
             'minimum_order_quantity' =>
                 2,
+
+            'delivery_fee_per_unit' =>
+                500,
 
             'description' =>
                 'Premium rice.',
@@ -280,6 +293,10 @@ class ListingRichnessTest extends TestCase
                 '45000.00'
             )
             ->assertJsonPath(
+                'data.delivery_fee_per_unit',
+                '500.00'
+            )
+            ->assertJsonPath(
                 'data.original_price',
                 '50000.00'
             )
@@ -342,6 +359,9 @@ class ListingRichnessTest extends TestCase
                     'minimum_order_quantity' =>
                         1,
 
+                    'delivery_fee_per_unit' =>
+                        500,
+
                     'label' =>
                         'premium',
 
@@ -393,6 +413,9 @@ class ListingRichnessTest extends TestCase
                     'stock' =>
                         100,
 
+                    'delivery_fee_per_unit' =>
+                        500,
+
                     'publication_status' =>
                         'live',
                 ]
@@ -435,6 +458,9 @@ class ListingRichnessTest extends TestCase
                     'stock' =>
                         100,
 
+                    'delivery_fee_per_unit' =>
+                        500,
+
                     'status' =>
                         ListingStatus::Active
                             ->value,
@@ -446,6 +472,10 @@ class ListingRichnessTest extends TestCase
             ->assertJsonPath(
                 'data.status',
                 'active'
+            )
+            ->assertJsonPath(
+                'data.delivery_fee_per_unit',
+                '500.00'
             )
             ->assertJsonPath(
                 'data.publication_status',

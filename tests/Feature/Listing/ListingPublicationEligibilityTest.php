@@ -242,6 +242,9 @@ class ListingPublicationEligibilityTest extends TestCase
                 'stock' =>
                     100,
 
+                'delivery_fee_per_unit' =>
+                    500,
+
                 'publication_status' =>
                     ListingPublicationStatus::Pending,
             ]);
@@ -521,6 +524,9 @@ class ListingPublicationEligibilityTest extends TestCase
             'minimum_order_quantity' =>
                 1,
 
+            'delivery_fee_per_unit' =>
+                500,
+
             'available_from' =>
                 now()
                     ->subDay()
@@ -551,6 +557,9 @@ class ListingPublicationEligibilityTest extends TestCase
 
                 'minimum_order_quantity' =>
                     1,
+
+                'delivery_fee_per_unit' =>
+                    500,
             ],
             $overrides
         );

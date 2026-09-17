@@ -6,4 +6,5 @@ enum DeliveryMethod: string
 {
     case Standard = 'standard';
     case Express = 'express';
+    case Pickup = 'pickup';
 }
