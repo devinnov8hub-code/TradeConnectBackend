@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\V1\Admin\ActivityController;
+use App\Http\Controllers\Api\V1\Admin\FarmerActivityController;
 use App\Http\Controllers\Api\V1\MarketplaceCategoryController;
 use App\Http\Controllers\Api\V1\Admin\BuyerController;
 use App\Http\Controllers\Api\V1\Admin\CategoryController;
@@ -287,6 +288,14 @@ Route::prefix('v1')->group(function () {
                     'updateStatus',
                 ]
             );
+
+            Route::get(
+    'farmers/{farmer}/activities',
+    [
+        FarmerActivityController::class,
+        'index',
+    ]
+);
 
             Route::patch(
                 'farmers/{farmer}/verification',
