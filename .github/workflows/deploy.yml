@@ -1,0 +1,141 @@
+name: Deploy TradeConnect Backend
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: tradeconnect-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  EC2_INSTANCE_ID: i-00e4549b3c8dfe9d1
+  APP_DIR: /var/www/tradeconnect
+
+jobs:
+  deploy:
+    name: Deploy to TradeConnect Production
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::580510132728:role/GitHubActions-TradeConnectDeploy
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: TradeConnectGitHubActions
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Deploy application through SSM
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${EC2_INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "TradeConnect deployment - ${GITHUB_SHA}" \
+            --parameters 'commands=[
+              "set -e",
+              "cd /var/www/tradeconnect",
+              "echo \"Starting TradeConnect deployment\"",
+              "echo \"Target commit: '${GITHUB_SHA}'\"",
+              "git fetch origin main",
+              "git reset --hard origin/main",
+              "echo \"Deployed commit:\"",
+              "git rev-parse HEAD",
+              "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
+              "php artisan migrate --force",
+              "php artisan optimize:clear",
+              "php artisan config:cache",
+              "php artisan route:cache",
+              "php artisan view:cache",
+              "sudo systemctl reload php8.5-fpm",
+              "sudo nginx -t",
+              "sudo systemctl reload nginx",
+              "echo \"TradeConnect deployment completed successfully\""
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: ${COMMAND_ID}"
+          echo "COMMAND_ID=${COMMAND_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMMAND_ID="${{ steps.deploy.outputs.COMMAND_ID }}"
+
+          echo "Waiting for SSM deployment command: ${COMMAND_ID}"
+
+          for i in {1..60}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${EC2_INSTANCE_ID}" \
+              --query "Status" \
+              --output text 2>/dev/null || true)
+
+            echo "Attempt ${i}/60 - Status: ${STATUS}"
+
+            case "${STATUS}" in
+              Success)
+                echo "Deployment completed successfully."
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut|Cancelling)
+                echo "Deployment failed with status: ${STATUS}"
+                exit 1
+                ;;
+              Pending|InProgress|Delayed|"")
+                sleep 5
+                ;;
+              *)
+                sleep 5
+                ;;
+            esac
+          done
+
+          echo "Deployment timed out while waiting for SSM."
+          exit 1
+
+      - name: Show deployment output
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COMMAND_ID="${{ steps.deploy.outputs.COMMAND_ID }}"
+
+          if [ -z "${COMMAND_ID}" ]; then
+            echo "No SSM command ID was generated."
+            exit 0
+          fi
+
+          echo "===== SSM DEPLOYMENT OUTPUT ====="
+
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${EC2_INSTANCE_ID}" \
+            --query 'StandardOutputContent' \
+            --output text || true
+
+          echo "===== SSM ERROR OUTPUT ====="
+
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${EC2_INSTANCE_ID}" \
+            --query 'StandardErrorContent' \
+            --output text || true
