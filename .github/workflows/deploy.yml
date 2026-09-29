@@ -48,7 +48,7 @@ jobs:
             --comment "TradeConnect deployment - ${GITHUB_SHA}" \
             --parameters 'commands=[
               "set -e",
-              git config --global --add safe.directory /var/www/tradeconnect",
+              "git config --global --add safe.directory /var/www/tradeconnect",
               "cd /var/www/tradeconnect",
               "echo \"Starting TradeConnect deployment\"",
               "echo \"Target commit: '${GITHUB_SHA}'\"",
