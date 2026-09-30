@@ -55,6 +55,8 @@ jobs:
               "git -c safe.directory=/var/www/tradeconnect reset --hard origin/main",
               "echo \"Deployed commit:\"",
               "git -c safe.directory=/var/www/tradeconnect rev-parse HEAD",
+              "export HOME=/root",
+              "export COMPOSER_HOME=/root/.composer",
               "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
               "php artisan migrate --force",
               "php artisan optimize:clear",
