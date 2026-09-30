@@ -48,14 +48,13 @@ jobs:
             --comment "TradeConnect deployment - ${GITHUB_SHA}" \
             --parameters 'commands=[
               "set -e",
-              "git config --global --add safe.directory /var/www/tradeconnect",
               "cd /var/www/tradeconnect",
               "echo \"Starting TradeConnect deployment\"",
               "echo \"Target commit: '${GITHUB_SHA}'\"",
-              "git fetch origin main",
-              "git reset --hard origin/main",
+              "git -c safe.directory=/var/www/tradeconnect fetch origin main",
+              "git -c safe.directory=/var/www/tradeconnect reset --hard origin/main",
               "echo \"Deployed commit:\"",
-              "git rev-parse HEAD",
+              "git -c safe.directory=/var/www/tradeconnect rev-parse HEAD",
               "composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction",
               "php artisan migrate --force",
               "php artisan optimize:clear",
